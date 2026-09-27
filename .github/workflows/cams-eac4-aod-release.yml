@@ -1,0 +1,119 @@
+name: CAMS EAC4 AOD - Singapore (2014-2025)
+
+on:
+  workflow_dispatch:
+    inputs:
+      years:
+        description: >-
+          Comma-separated years to (re-)download, e.g. "2019,2020". Leave
+          empty to process all years 2014-2025 that are still missing from
+          the release.
+        required: false
+        default: ""
+      force:
+        description: "Re-download and overwrite years even if already present on the release"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: eac4-data-2014-2025
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  download-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Configure ADS API credentials
+        run: |
+          cat > "$HOME/.cdsapirc" <<EOF
+          url: https://ads.atmosphere.copernicus.eu/api
+          key: ${{ secrets.CDSAPI_KEY }}
+          EOF
+
+      - name: Ensure release exists
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --title "CAMS EAC4 AOD - Singapore (2014-2025)" \
+              --notes "CAMS EAC4 reanalysis aerosol optical depth (organic matter AOD 550nm, total AOD 550nm) for the native 0.75x0.75 deg grid cell nearest Singapore's centroid (1.5N, 103.5E), 3-hourly (00/03/06/09/12/15/18/21 UTC), 2014-01-04 through 2025-12-31.
+
+          One NetCDF file per year: cams_eac4_aod_singapore_<year>.nc
+
+          If a year is missing below, re-run the cams-eac4-aod-release workflow (workflow_dispatch) - it only re-fetches years not yet present on this release."
+          fi
+
+      - name: Determine years to fetch
+        id: years
+        run: |
+          if [ -n "${{ inputs.years }}" ]; then
+            candidates="${{ inputs.years }}"
+          else
+            candidates=$(seq -s, 2014 2025)
+          fi
+
+          if [ "${{ inputs.force }}" = "true" ]; then
+            echo "Forcing re-download of: $candidates"
+            echo "years=$candidates" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          existing=$(gh release view "$RELEASE_TAG" --json assets -q '.assets[].name')
+          missing=""
+          IFS=',' read -ra YEARS <<< "$candidates"
+          for y in "${YEARS[@]}"; do
+            fname="cams_eac4_aod_singapore_${y}.nc"
+            if echo "$existing" | grep -qx "$fname"; then
+              echo "Skipping $y (already on release)"
+            else
+              missing="${missing:+$missing,}$y"
+            fi
+          done
+          echo "Years to fetch: $missing"
+          echo "years=$missing" >> "$GITHUB_OUTPUT"
+
+      - name: Download EAC4 AOD data
+        if: steps.years.outputs.years != ''
+        continue-on-error: true
+        run: python scripts/download_eac4_aod.py --years "${{ steps.years.outputs.years }}" --outdir output
+
+      - name: Upload NetCDF files to release
+        if: steps.years.outputs.years != ''
+        run: |
+          shopt -s nullglob
+          files=(output/*.nc)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No files were produced; nothing to upload."
+          else
+            gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
+          fi
+
+      - name: Write job summary
+        if: steps.years.outputs.years != ''
+        run: python scripts/write_job_summary.py
+
+      - name: Fail job if any requested year did not succeed
+        if: steps.years.outputs.years != ''
+        run: |
+          python3 -c "
+          import json, sys
+          data = json.load(open('output/summary.json'))
+          failed = [y for y, s in data.items() if s != 'ok']
+          if failed:
+              print(f'Failed years: {failed}')
+              sys.exit(1)
+          "
