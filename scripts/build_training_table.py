@@ -176,7 +176,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pm25-csv", required=True, type=Path, help="Path to Historical1hrPM2_5.csv")
     parser.add_argument("--cache-dir", default=Path("data_cache"), type=Path)
-    parser.add_argument("--output", default=Path("output/training_table.csv"), type=Path)
+    parser.add_argument("--output", default=Path("data/training_table.csv"), type=Path)
     parser.add_argument("--format", choices=["csv", "parquet"], default="csv")
     args = parser.parse_args()
 
