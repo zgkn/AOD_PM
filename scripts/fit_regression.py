@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""OLS regression of pm25_max against aod_total and ventilation_rate.
+
+Fits pm25_max ~ aod_total + ventilation_rate (with intercept) on the
+training table, prints the full statsmodels summary (coefficients, std
+errors, p-values, R^2), and saves a residuals-vs-fitted + Q-Q diagnostic
+plot so the fit can be checked rather than taken on faith.
+"""
+import argparse
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import pandas as pd
+import statsmodels.api as sm
+
+COLOR = "#2a78d6"
+SURFACE = "#fcfcfb"
+GRIDLINE = "#e1e0d9"
+MUTED = "#898781"
+INK = "#0b0b0b"
+
+PREDICTORS = ["aod_total", "ventilation_rate"]
+TARGET = "pm25_max"
+
+
+def fit(df: pd.DataFrame):
+    X = sm.add_constant(df[PREDICTORS])
+    y = df[TARGET]
+    return sm.OLS(y, X).fit()
+
+
+def plot_diagnostics(model, output: Path) -> None:
+    fitted = model.fittedvalues
+    resid = model.resid
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 5), facecolor=SURFACE)
+
+    ax = axes[0]
+    ax.set_facecolor(SURFACE)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.tick_params(colors=MUTED, labelsize=8, length=0)
+    ax.grid(True, color=GRIDLINE, linewidth=0.8, zorder=0)
+    ax.set_axisbelow(True)
+    ax.axhline(0, color=MUTED, linewidth=1, zorder=1)
+    ax.scatter(fitted, resid, s=6, c=COLOR, alpha=0.08, linewidths=0, zorder=2)
+    ax.set_xlabel("Fitted pm25_max", color=INK, fontsize=9)
+    ax.set_ylabel("Residual", color=INK, fontsize=9)
+    ax.set_title("Residuals vs fitted", color=INK, fontsize=10)
+
+    ax = axes[1]
+    ax.set_facecolor(SURFACE)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.tick_params(colors=MUTED, labelsize=8, length=0)
+    ax.grid(True, color=GRIDLINE, linewidth=0.8, zorder=0)
+    ax.set_axisbelow(True)
+    sm.qqplot(resid, line="45", ax=ax, markerfacecolor=COLOR, markeredgecolor=COLOR, alpha=0.3, markersize=3)
+    ax.get_lines()[1].set_color(MUTED)
+    ax.set_title("Q-Q plot of residuals", color=INK, fontsize=10)
+    ax.set_xlabel(ax.get_xlabel(), color=INK, fontsize=9)
+    ax.set_ylabel(ax.get_ylabel(), color=INK, fontsize=9)
+
+    fig.suptitle("pm25_max ~ aod_total + ventilation_rate -- residual diagnostics", color=INK, fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, dpi=150, facecolor=SURFACE)
+    print(f"Wrote {output}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--table", default=Path("data/training_table.csv"), type=Path)
+    parser.add_argument("--output", default=Path("output/regression_diagnostics.png"), type=Path)
+    args = parser.parse_args()
+
+    df = pd.read_csv(args.table)
+    model = fit(df)
+
+    print(model.summary())
+    print()
+    print(f"n = {len(df):,}")
+    print(f"Residual skew: {model.resid.skew():.2f}  (0 = symmetric; this model's target is heavily right-skewed)")
+
+    plot_diagnostics(model, args.output)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
