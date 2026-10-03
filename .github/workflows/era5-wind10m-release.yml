@@ -1,0 +1,121 @@
+name: ERA5 10m Wind - Singapore (2014-2025)
+
+on:
+  workflow_dispatch:
+    inputs:
+      years:
+        description: >-
+          Comma-separated years to (re-)download, e.g. "2019,2020". Leave
+          empty to process all years 2014-2025 that are still missing from
+          the release.
+        required: false
+        default: ""
+      force:
+        description: "Re-download and overwrite years even if already present on the release"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: era5-wind10m-2014-2025
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  download-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Reuses the same CDSAPI_KEY secret as the PBLH job -- same unified
+      # CDS account, no new secret needed.
+      - name: Configure CDS API credentials
+        run: |
+          cat > "$HOME/.cdsapirc" <<EOF
+          url: https://cds.climate.copernicus.eu/api
+          key: ${{ secrets.CDSAPI_KEY }}
+          EOF
+
+      - name: Ensure release exists
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --title "ERA5 10m Wind - Singapore (2014-2025)" \
+              --notes "ERA5 reanalysis 10m wind (u10, v10, and derived wind_speed = sqrt(u10^2+v10^2)) for the same grid cell used by the eac4-data-2014-2025 and era5-pblh-2014-2025 releases (1.5N, 103.5E, a native ERA5 0.25x0.25 deg grid node). 3-hourly (00/03/06/09/12/15/18/21 UTC), 2014-01-04 through 2025-12-31, matching the EAC4/PBLH timestamps exactly.
+
+          One NetCDF file per year: era5_wind10m_singapore_<year>.nc
+
+          If a year is missing below, re-run the era5-wind10m-release workflow (workflow_dispatch) - it only re-fetches years not yet present on this release."
+          fi
+
+      - name: Determine years to fetch
+        id: years
+        run: |
+          if [ -n "${{ inputs.years }}" ]; then
+            candidates="${{ inputs.years }}"
+          else
+            candidates=$(seq -s, 2014 2025)
+          fi
+
+          if [ "${{ inputs.force }}" = "true" ]; then
+            echo "Forcing re-download of: $candidates"
+            echo "years=$candidates" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          existing=$(gh release view "$RELEASE_TAG" --json assets -q '.assets[].name')
+          missing=""
+          IFS=',' read -ra YEARS <<< "$candidates"
+          for y in "${YEARS[@]}"; do
+            fname="era5_wind10m_singapore_${y}.nc"
+            if echo "$existing" | grep -qx "$fname"; then
+              echo "Skipping $y (already on release)"
+            else
+              missing="${missing:+$missing,}$y"
+            fi
+          done
+          echo "Years to fetch: $missing"
+          echo "years=$missing" >> "$GITHUB_OUTPUT"
+
+      - name: Download ERA5 10m wind data
+        if: steps.years.outputs.years != ''
+        continue-on-error: true
+        run: python scripts/download_era5_wind10m.py --years "${{ steps.years.outputs.years }}" --outdir output
+
+      - name: Upload NetCDF files to release
+        if: steps.years.outputs.years != ''
+        run: |
+          shopt -s nullglob
+          files=(output/*.nc)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No files were produced; nothing to upload."
+          else
+            gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
+          fi
+
+      - name: Write job summary
+        if: steps.years.outputs.years != ''
+        run: python scripts/write_job_summary.py --title "ERA5 10m wind download summary"
+
+      - name: Fail job if any requested year did not succeed
+        if: steps.years.outputs.years != ''
+        run: |
+          python3 -c "
+          import json, sys
+          data = json.load(open('output/summary.json'))
+          failed = [y for y, s in data.items() if s != 'ok']
+          if failed:
+              print(f'Failed years: {failed}')
+              sys.exit(1)
+          "
