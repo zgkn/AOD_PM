@@ -46,6 +46,28 @@ def categorize(df: pd.DataFrame, target: str) -> pd.DataFrame:
     return df
 
 
+def chronological_split(df: pd.DataFrame, train_frac: float):
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    cut = int(len(df) * train_frac)
+    return df.iloc[:cut].copy(), df.iloc[cut:].copy()
+
+
+def evaluate(result, df_eval: pd.DataFrame, predictor: str) -> dict:
+    probs = predict_probs(result, df_eval[[predictor]])
+    predicted = probs.idxmax(axis=1)
+    actual = df_eval["pm25_category"].astype(str)
+    accuracy = (predicted.values == actual.values).mean()
+    # Mean log-likelihood per row of the TRUE category's predicted probability.
+    true_probs = probs.to_numpy()[np.arange(len(df_eval)), actual.map(BAND_LABELS.index).to_numpy()]
+    mean_ll = np.log(np.clip(true_probs, 1e-12, None)).mean()
+    return {
+        "n": len(df_eval),
+        "accuracy": accuracy,
+        "baseline_accuracy": (actual == "Normal").mean(),
+        "mean_log_likelihood": mean_ll,
+    }
+
+
 def predict_probs(model_result, X: pd.DataFrame) -> pd.DataFrame:
     # OrderedModel.predict() returns integer category codes (0..k-1) as
     # columns, in the categorical's category order -- relabel to BAND_LABELS.
@@ -91,6 +113,14 @@ def main() -> int:
     parser.add_argument("--output", default=Path("output/ordinal_logistic.png"), type=Path)
     parser.add_argument("--target", default=DEFAULT_TARGET, help="Column to bucket into PM2.5 bands.")
     parser.add_argument("--predictor", default=DEFAULT_PREDICTOR, help="Single predictor column.")
+    parser.add_argument(
+        "--validate", action="store_true",
+        help="Fit on the first --train-frac of the timeline, evaluate on the held-out remainder.",
+    )
+    parser.add_argument(
+        "--train-frac", type=float, default=0.8,
+        help="Fraction of the (chronologically sorted) data used for training when --validate is set.",
+    )
     args = parser.parse_args()
 
     df = pd.read_csv(args.table)
@@ -100,29 +130,62 @@ def main() -> int:
     print(df["pm25_category"].value_counts().reindex(BAND_LABELS).to_string())
     print()
 
-    model = OrderedModel(df["pm25_category"], df[[args.predictor]], distr="logit")
-    result = model.fit(method="bfgs", disp=False)
-    print(result.summary())
-    print()
+    if args.validate:
+        train, val = chronological_split(df, args.train_frac)
+        print(
+            f"Chronological split: train={len(train):,} rows "
+            f"({train['timestamp'].min()} to {train['timestamp'].max()}), "
+            f"validation={len(val):,} rows ({val['timestamp'].min()} to {val['timestamp'].max()})"
+        )
+        print("Rows per band, train vs validation:")
+        print(
+            pd.DataFrame({
+                "train": train["pm25_category"].value_counts().reindex(BAND_LABELS),
+                "validation": val["pm25_category"].value_counts().reindex(BAND_LABELS),
+            }).to_string()
+        )
+        print()
 
-    # Classification check: predicted band = argmax predicted probability.
-    probs = predict_probs(result, df[[args.predictor]])
-    predicted = probs.idxmax(axis=1)
-    actual = df["pm25_category"].astype(str)
-    accuracy = (predicted.values == actual.values).mean()
-    print(f"n = {len(df):,}")
-    print(f"Argmax classification accuracy: {accuracy:.3f}")
-    print(
-        "(A naive 'always predict Normal' baseline would score "
-        f"{(actual == 'Normal').mean():.3f} -- compare against that, not against 1.0.)"
-    )
-    print()
+        model = OrderedModel(train["pm25_category"], train[[args.predictor]], distr="logit")
+        result = model.fit(method="bfgs", disp=False)
+        print(result.summary())
+        print()
+
+        train_metrics = evaluate(result, train, args.predictor)
+        val_metrics = evaluate(result, val, args.predictor)
+        for name, m in [("Train", train_metrics), ("Validation", val_metrics)]:
+            print(
+                f"{name:>10}: n={m['n']:,}  accuracy={m['accuracy']:.3f} "
+                f"(baseline={m['baseline_accuracy']:.3f})  mean log-lik={m['mean_log_likelihood']:.3f}"
+            )
+        ll_gap = train_metrics["mean_log_likelihood"] - val_metrics["mean_log_likelihood"]
+        print(f"Mean log-likelihood gap (train - validation) = {ll_gap:.3f}")
+        if ll_gap > 0.1:
+            print("CAUTION: validation fit is notably worse than train -- possible overfitting or regime shift.")
+
+        plot_df = df
+    else:
+        model = OrderedModel(df["pm25_category"], df[[args.predictor]], distr="logit")
+        result = model.fit(method="bfgs", disp=False)
+        print(result.summary())
+        print()
+
+        metrics = evaluate(result, df, args.predictor)
+        print(f"n = {len(df):,}")
+        print(f"Argmax classification accuracy: {metrics['accuracy']:.3f}")
+        print(
+            "(A naive 'always predict Normal' baseline would score "
+            f"{metrics['baseline_accuracy']:.3f} -- compare against that, not against 1.0.)"
+        )
+        print()
+        plot_df = df
+
     for label in BAND_LABELS:
         n = int((df["pm25_category"] == label).sum())
         if n < 30:
-            print(f"CAUTION: '{label}' has only n={n} in the data -- its predicted probabilities are not well constrained.")
+            print(f"CAUTION: '{label}' has only n={n} in the full data -- its predicted probabilities are not well constrained.")
 
-    plot_predicted_probabilities(result, df, args.predictor, args.output)
+    plot_predicted_probabilities(result, plot_df, args.predictor, args.output)
     return 0
 
 

@@ -31,14 +31,33 @@ DEFAULT_PREDICTORS = ["aod_total", "ventilation_rate"]
 DEFAULT_TARGET = "pm25_max"
 
 
-def fit(df: pd.DataFrame, predictors: list, target: str, log: bool):
+def build_Xy(df: pd.DataFrame, predictors: list, target: str, log: bool):
     if log:
-        X = sm.add_constant(np.log(df[predictors]))
+        X = sm.add_constant(np.log(df[predictors]), has_constant="add")
         y = np.log(df[target])
     else:
-        X = sm.add_constant(df[predictors])
+        X = sm.add_constant(df[predictors], has_constant="add")
         y = df[target]
+    return X, y
+
+
+def fit(df: pd.DataFrame, predictors: list, target: str, log: bool):
+    X, y = build_Xy(df, predictors, target, log)
     return sm.OLS(y, X).fit()
+
+
+def chronological_split(df: pd.DataFrame, train_frac: float):
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    cut = int(len(df) * train_frac)
+    return df.iloc[:cut].copy(), df.iloc[cut:].copy()
+
+
+def out_of_sample_r2(model, df_eval: pd.DataFrame, predictors: list, target: str, log: bool) -> float:
+    X, y = build_Xy(df_eval, predictors, target, log)
+    pred = model.predict(X)
+    ss_res = ((y - pred) ** 2).sum()
+    ss_tot = ((y - y.mean()) ** 2).sum()
+    return 1 - ss_res / ss_tot
 
 
 def plot_diagnostics(model, predictors: list, target: str, log: bool, output: Path) -> None:
@@ -96,16 +115,44 @@ def main() -> int:
         "--log", action="store_true",
         help="Fit log(target) ~ log(predictors) instead of the raw-value fit.",
     )
+    parser.add_argument(
+        "--validate", action="store_true",
+        help="Fit on the first --train-frac of the timeline, report R^2 on the held-out remainder.",
+    )
+    parser.add_argument(
+        "--train-frac", type=float, default=0.8,
+        help="Fraction of the (chronologically sorted) data used for training when --validate is set.",
+    )
     args = parser.parse_args()
     predictors = [c.strip() for c in args.predictors.split(",") if c.strip()]
 
     df = pd.read_csv(args.table)
-    model = fit(df, predictors, args.target, args.log)
 
-    print(model.summary())
-    print()
-    print(f"n = {len(df):,}")
-    print(f"Residual skew: {model.resid.skew():.2f}")
+    if args.validate:
+        train, val = chronological_split(df, args.train_frac)
+        model = fit(train, predictors, args.target, args.log)
+        train_r2 = model.rsquared
+        val_r2 = out_of_sample_r2(model, val, predictors, args.target, args.log)
+        print(
+            f"Chronological split: train={len(train):,} rows "
+            f"({train['timestamp'].min()} to {train['timestamp'].max()}), "
+            f"validation={len(val):,} rows ({val['timestamp'].min()} to {val['timestamp'].max()})"
+        )
+        print()
+        print(model.summary())
+        print()
+        print(f"Train R²       = {train_r2:.4f}  (n={len(train):,})")
+        print(f"Validation R²  = {val_r2:.4f}  (n={len(val):,})")
+        gap = train_r2 - val_r2
+        print(f"Gap (train - validation) = {gap:.4f}")
+        if gap > 0.05:
+            print("CAUTION: validation R² is notably lower than train -- possible overfitting or regime shift.")
+    else:
+        model = fit(df, predictors, args.target, args.log)
+        print(model.summary())
+        print()
+        print(f"n = {len(df):,}")
+        print(f"Residual skew: {model.resid.skew():.2f}")
 
     plot_diagnostics(model, predictors, args.target, args.log, args.output)
     return 0
