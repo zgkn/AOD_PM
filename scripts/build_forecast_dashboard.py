@@ -60,14 +60,6 @@ AOD_VAR_CANDIDATES = ("omaod550", "organic_matter_aerosol_optical_depth_550nm")
 def load_forecast(path: Path) -> pd.DataFrame:
     ds = xr.open_dataset(path)
 
-    print("--- forecast netCDF structure ---")
-    print(ds)
-    for name in ds.coords:
-        c = ds.coords[name]
-        print(f"coord {name}: dims={c.dims} shape={c.shape} dtype={c.dtype}")
-        print(f"  values={np.asarray(c.values).reshape(-1)[:30]}")
-    print("---------------------------------")
-
     var = next((n for n in AOD_VAR_CANDIDATES if n in ds.data_vars), None)
     if var is None:
         raise SystemExit(f"Could not find AOD_om variable among: {list(ds.data_vars)}")
@@ -88,16 +80,21 @@ def load_forecast(path: Path) -> pd.DataFrame:
     if lon_dim is not None:
         print(f"Nearest grid longitude to 103.5E: {float(data[lon_dim]):.3f}")
 
-    # Forecast-type CAMS output typically carries a reference time + a step
-    # (leadtime) timedelta rather than one flat "valid_time" coordinate like
-    # the reanalysis datasets do; handle both shapes rather than assume one.
+    # Forecast-type CAMS output carries a reference time + a leadtime
+    # timedelta (named "step" or "forecast_period" depending on how it was
+    # packaged) rather than one flat "valid_time" coordinate like the
+    # reanalysis datasets do; handle both shapes rather than assume one.
+    # "valid_time" itself, when present, is 2-D (forecast_reference_time x
+    # leadtime) even for a single reference time, so flatten explicitly --
+    # pd.to_datetime() on a 2-D array does not do this for you.
+    step_dim = next((d for d in ("step", "forecast_period") if d in ds.coords), None)
     if "valid_time" in ds.coords:
-        valid_time = pd.to_datetime(ds["valid_time"].values)
+        valid_time = pd.to_datetime(np.asarray(ds["valid_time"].values).reshape(-1))
     elif "time" in ds.coords and np.issubdtype(ds["time"].dtype, np.datetime64):
-        valid_time = pd.to_datetime(ds["time"].values)
-    elif "forecast_reference_time" in ds.coords and "step" in ds.coords:
+        valid_time = pd.to_datetime(np.asarray(ds["time"].values).reshape(-1))
+    elif "forecast_reference_time" in ds.coords and step_dim is not None:
         ref = pd.to_datetime(np.asarray(ds["forecast_reference_time"].values).item())
-        valid_time = ref + pd.to_timedelta(ds["step"].values)
+        valid_time = ref + pd.to_timedelta(np.asarray(ds[step_dim].values).reshape(-1))
     else:
         raise SystemExit(
             f"Could not determine forecast valid time from coords: {list(ds.coords)}"
