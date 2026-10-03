@@ -66,8 +66,19 @@ def load_forecast(path: Path) -> pd.DataFrame:
 
     lat_dim = next((d for d in ("latitude", "lat") if d in ds[var].dims), None)
     lon_dim = next((d for d in ("longitude", "lon") if d in ds[var].dims), None)
-    squeeze_dims = [d for d in (lat_dim, lon_dim) if d is not None]
-    data = ds[var].squeeze(dim=squeeze_dims, drop=True) if squeeze_dims else ds[var]
+    # The download request is a small box (not a single point -- this
+    # dataset's native grid doesn't land exactly on 1.5N/103.5E), so pick
+    # the nearest actual grid point to Singapore's centroid.
+    sel = {}
+    if lat_dim is not None:
+        sel[lat_dim] = 1.5
+    if lon_dim is not None:
+        sel[lon_dim] = 103.5
+    data = ds[var].sel(**sel, method="nearest") if sel else ds[var]
+    if lat_dim is not None:
+        print(f"Nearest grid latitude to 1.5N: {float(data[lat_dim]):.3f}")
+    if lon_dim is not None:
+        print(f"Nearest grid longitude to 103.5E: {float(data[lon_dim]):.3f}")
 
     # Forecast-type CAMS output typically carries a reference time + a step
     # (leadtime) timedelta rather than one flat "valid_time" coordinate like

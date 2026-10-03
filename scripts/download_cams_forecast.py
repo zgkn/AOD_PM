@@ -23,8 +23,12 @@ import cdsapi
 DATASET = "cams-global-atmospheric-composition-forecasts"
 VARIABLE = "organic_matter_aerosol_optical_depth_550nm"
 
-# Same single grid cell as the EAC4/ERA5 pulls: [North, West, South, East].
-AREA = [1.5, 103.5, 1.5, 103.5]
+# A single-point box ([1.5, 103.5, 1.5, 103.5], exact on the EAC4/ERA5
+# grids) gets rejected by this dataset with "area contains no grid points" --
+# its native grid doesn't land exactly on 1.5N/103.5E. Request a small box
+# around it instead and pick the nearest point out of the result at
+# analysis time (build_forecast_dashboard.py), [North, West, South, East].
+AREA = [2.5, 102.5, 0.5, 104.5]
 BASE_TIME = "00:00"
 LEADTIME_HOURS = [str(h) for h in range(0, 73, 3)]
 
