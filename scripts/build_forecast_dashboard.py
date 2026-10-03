@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the 3-day PM2.5 forecast dashboard (static HTML) from CAMS AOD_om.
+"""Build the 5-day PM2.5 forecast dashboard (static HTML) from CAMS AOD_om.
 
 Applies two models fit once (2026-10-03) on the full historical training
 table (data/training_table.csv, n=34,346) -- their coefficients are
@@ -161,7 +161,7 @@ def render_chart(df: pd.DataFrame) -> str:
     ax.plot(x, df["aod_om"], color=AOD_COLOR, linewidth=2, marker="o", markersize=3, zorder=2)
     ax.set_ylabel("Organic matter AOD", color=INK, fontsize=9)
     ax.set_title(
-        "CAMS forecast: max organic matter AOD over Singapore region, next 3 days",
+        "CAMS forecast: max organic matter AOD over Singapore region, next 5 days",
         color=INK, fontsize=11, loc="left",
     )
 
@@ -206,7 +206,7 @@ def render_html(df: pd.DataFrame, chart_b64: str, generated_at: datetime) -> str
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Singapore PM2.5 3-day forecast</title>
+<title>Singapore PM2.5 5-day forecast</title>
 <style>
   body {{ font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: {SURFACE}; color: {INK};
           max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }}
@@ -218,13 +218,13 @@ def render_html(df: pd.DataFrame, chart_b64: str, generated_at: datetime) -> str
 </style>
 </head>
 <body>
-  <h1>Singapore PM2.5 -- 3-day forecast</h1>
+  <h1>Singapore PM2.5 -- 5-day forecast</h1>
   <div class="meta">
     AOD_om: max over a 3&deg;&times;3&deg; box centered on Singapore (1.5&deg;N, 103.5&deg;E), to account for forecast plume-position uncertainty
     &middot; Generated {generated_at.strftime('%Y-%m-%d %H:%M UTC')}
   </div>
 
-  <img src="data:image/png;base64,{chart_b64}" alt="3-day AOD and PM2.5 forecast chart">
+  <img src="data:image/png;base64,{chart_b64}" alt="5-day AOD and PM2.5 forecast chart">
 
   <footer>
     Models fit once on 34,346 historical observations (2014-03-31 to 2025-12-31) from EAC4/ERA5

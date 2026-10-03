@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download the latest 3-day CAMS organic matter AOD forecast for Singapore.
+"""Download the latest 5-day CAMS organic matter AOD forecast for Singapore.
 
 Dataset: cams-global-atmospheric-composition-forecasts
 Variable: organic_matter_aerosol_optical_depth_550nm
@@ -8,7 +8,7 @@ point used elsewhere in this project) rather than a single grid cell --
 build_forecast_dashboard.py takes the max AOD_om over this box per
 timestep, to account for forecast plume-position uncertainty rather than
 betting on one exact grid cell.
-Leadtime: 0..72h step 3 (3-hourly, matching the training data's cadence).
+Leadtime: 0..120h step 3 (3-hourly, matching the training data's cadence).
 
 Forecast cycles (00Z) take a few hours to publish after the cycle time, so
 today's cycle may not exist yet; tries today's base date first and falls
@@ -38,7 +38,7 @@ VARIABLE = "organic_matter_aerosol_optical_depth_550nm"
 # single-cell version needed a small box just to get a hit.)
 AREA = [3.0, 102.0, 0.0, 105.0]
 BASE_TIME = "00:00"
-LEADTIME_HOURS = [str(h) for h in range(0, 73, 3)]
+LEADTIME_HOURS = [str(h) for h in range(0, 121, 3)]
 
 
 def unwrap_if_zip(path: Path) -> None:

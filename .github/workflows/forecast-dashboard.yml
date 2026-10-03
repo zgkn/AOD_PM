@@ -36,7 +36,7 @@ jobs:
           key: ${{ secrets.CDSAPI_KEY }}
           EOF
 
-      - name: Download CAMS organic matter AOD forecast (next 3 days)
+      - name: Download CAMS organic matter AOD forecast (next 5 days)
         run: python scripts/download_cams_forecast.py --output output/cams_forecast_aod_om.nc
 
       - name: Build forecast dashboard
