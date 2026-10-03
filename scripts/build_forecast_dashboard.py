@@ -201,14 +201,6 @@ def render_chart(df: pd.DataFrame) -> str:
 
 
 def render_html(df: pd.DataFrame, chart_b64: str, generated_at: datetime) -> str:
-    now_row = df.iloc[0]
-    peak_row = df.loc[df["pm25_linear"].idxmax()]
-    band_order = {label: i for i, label in enumerate(BAND_LABELS)}
-    peak_band_row = df.loc[df["pm25_band"].map(band_order).idxmax()]
-
-    def badge(label: str) -> str:
-        return f'<span style="background:{BAND_COLORS[label]};color:#fff;padding:2px 10px;border-radius:12px;font-weight:600;">{label}</span>'
-
     html = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -220,10 +212,6 @@ def render_html(df: pd.DataFrame, chart_b64: str, generated_at: datetime) -> str
           max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }}
   h1 {{ font-size: 1.4rem; margin-bottom: 4px; }}
   .meta {{ color: {MUTED}; font-size: 0.9rem; margin-bottom: 24px; }}
-  .summary {{ display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 28px; }}
-  .stat {{ background: #fff; border: 1px solid {GRIDLINE}; border-radius: 10px; padding: 14px 18px; flex: 1; min-width: 220px; }}
-  .stat .label {{ color: {MUTED}; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; }}
-  .stat .value {{ font-size: 1.3rem; font-weight: 600; margin-top: 4px; }}
   img {{ width: 100%; height: auto; border-radius: 8px; border: 1px solid {GRIDLINE}; }}
   footer {{ color: {MUTED}; font-size: 0.8rem; margin-top: 24px; }}
   a {{ color: {AOD_COLOR}; }}
@@ -234,21 +222,6 @@ def render_html(df: pd.DataFrame, chart_b64: str, generated_at: datetime) -> str
   <div class="meta">
     AOD_om: max over a 3&deg;&times;3&deg; box centered on Singapore (1.5&deg;N, 103.5&deg;E), to account for forecast plume-position uncertainty
     &middot; Generated {generated_at.strftime('%Y-%m-%d %H:%M UTC')}
-  </div>
-
-  <div class="summary">
-    <div class="stat">
-      <div class="label">Now (t+0h, {now_row['valid_time'].strftime('%Y-%m-%d %H:%M UTC')})</div>
-      <div class="value">{now_row['pm25_linear']:.0f} µg/m³ {badge(now_row['pm25_band'])}</div>
-    </div>
-    <div class="stat">
-      <div class="label">Peak estimate (linear model), {peak_row['valid_time'].strftime('%Y-%m-%d %H:%M UTC')}</div>
-      <div class="value">{peak_row['pm25_linear']:.0f} µg/m³ {badge(peak_row['pm25_band'])}</div>
-    </div>
-    <div class="stat">
-      <div class="label">Most severe predicted band (ordinal model), {peak_band_row['valid_time'].strftime('%Y-%m-%d %H:%M UTC')}</div>
-      <div class="value">{badge(peak_band_row['pm25_band'])}</div>
-    </div>
   </div>
 
   <img src="data:image/png;base64,{chart_b64}" alt="3-day AOD and PM2.5 forecast chart">
