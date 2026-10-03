@@ -209,7 +209,14 @@ def main() -> int:
         f"dropping any row with a missing source ({n_before - len(table)} dropped)."
     )
 
-    table = table[["aod_om", "aod_total", "pblh", "wind10m", "pm25_max", "pm25_mean"]]
+    # Ventilation rate (pblh * wind10m): the standard ventilation coefficient
+    # in air-quality meteorology -- a deep, windy boundary layer disperses
+    # pollutants, a shallow, calm one lets them accumulate.
+    table["ventilation_rate"] = table["pblh"] * table["wind10m"]
+
+    table = table[
+        ["aod_om", "aod_total", "pblh", "wind10m", "ventilation_rate", "pm25_max", "pm25_mean"]
+    ]
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if args.format == "csv":
