@@ -60,6 +60,14 @@ AOD_VAR_CANDIDATES = ("omaod550", "organic_matter_aerosol_optical_depth_550nm")
 def load_forecast(path: Path) -> pd.DataFrame:
     ds = xr.open_dataset(path)
 
+    print("--- forecast netCDF structure ---")
+    print(ds)
+    for name in ds.coords:
+        c = ds.coords[name]
+        print(f"coord {name}: dims={c.dims} shape={c.shape} dtype={c.dtype}")
+        print(f"  values={np.asarray(c.values).reshape(-1)[:30]}")
+    print("---------------------------------")
+
     var = next((n for n in AOD_VAR_CANDIDATES if n in ds.data_vars), None)
     if var is None:
         raise SystemExit(f"Could not find AOD_om variable among: {list(ds.data_vars)}")
