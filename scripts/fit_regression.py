@@ -5,11 +5,19 @@ Fits pm25_max ~ predictors (with intercept) on the training table, prints
 the full statsmodels summary (coefficients, std errors, p-values, R^2),
 and saves a residuals-vs-fitted + Q-Q diagnostic plot so the fit can be
 checked rather than taken on faith.
+
+--log fits log(pm25_max) ~ log(predictors) instead: the target and
+aod_total/ventilation_rate are all strictly positive and right-skewed
+(see the earlier residual diagnostics -- skew 6.2, kurtosis 137, fanning
+residuals), which a log-log fit is the standard first move against. The
+fitted slope on a logged predictor is then an elasticity: % change in
+pm25_max per % change in that predictor.
 """
 import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 
@@ -23,15 +31,20 @@ DEFAULT_PREDICTORS = ["aod_total", "ventilation_rate"]
 TARGET = "pm25_max"
 
 
-def fit(df: pd.DataFrame, predictors: list):
-    X = sm.add_constant(df[predictors])
-    y = df[TARGET]
+def fit(df: pd.DataFrame, predictors: list, log: bool):
+    if log:
+        X = sm.add_constant(np.log(df[predictors]))
+        y = np.log(df[TARGET])
+    else:
+        X = sm.add_constant(df[predictors])
+        y = df[TARGET]
     return sm.OLS(y, X).fit()
 
 
-def plot_diagnostics(model, predictors: list, output: Path) -> None:
+def plot_diagnostics(model, predictors: list, log: bool, output: Path) -> None:
     fitted = model.fittedvalues
     resid = model.resid
+    target_label = f"log({TARGET})" if log else TARGET
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 5), facecolor=SURFACE)
 
@@ -44,7 +57,7 @@ def plot_diagnostics(model, predictors: list, output: Path) -> None:
     ax.set_axisbelow(True)
     ax.axhline(0, color=MUTED, linewidth=1, zorder=1)
     ax.scatter(fitted, resid, s=6, c=COLOR, alpha=0.08, linewidths=0, zorder=2)
-    ax.set_xlabel("Fitted pm25_max", color=INK, fontsize=9)
+    ax.set_xlabel(f"Fitted {target_label}", color=INK, fontsize=9)
     ax.set_ylabel("Residual", color=INK, fontsize=9)
     ax.set_title("Residuals vs fitted", color=INK, fontsize=10)
 
@@ -61,8 +74,8 @@ def plot_diagnostics(model, predictors: list, output: Path) -> None:
     ax.set_xlabel(ax.get_xlabel(), color=INK, fontsize=9)
     ax.set_ylabel(ax.get_ylabel(), color=INK, fontsize=9)
 
-    formula = " + ".join(predictors)
-    fig.suptitle(f"pm25_max ~ {formula} -- residual diagnostics", color=INK, fontsize=12)
+    pred_label = ", ".join(f"log({p})" for p in predictors) if log else " + ".join(predictors)
+    fig.suptitle(f"{target_label} ~ {pred_label} -- residual diagnostics", color=INK, fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=150, facecolor=SURFACE)
@@ -78,18 +91,22 @@ def main() -> int:
         default=",".join(DEFAULT_PREDICTORS),
         help="Comma-separated predictor column names.",
     )
+    parser.add_argument(
+        "--log", action="store_true",
+        help="Fit log(pm25_max) ~ log(predictors) instead of the raw-value fit.",
+    )
     args = parser.parse_args()
     predictors = [c.strip() for c in args.predictors.split(",") if c.strip()]
 
     df = pd.read_csv(args.table)
-    model = fit(df, predictors)
+    model = fit(df, predictors, args.log)
 
     print(model.summary())
     print()
     print(f"n = {len(df):,}")
-    print(f"Residual skew: {model.resid.skew():.2f}  (0 = symmetric; this model's target is heavily right-skewed)")
+    print(f"Residual skew: {model.resid.skew():.2f}  (0 = symmetric; the raw-value fit's residuals had skew 6.2)")
 
-    plot_diagnostics(model, predictors, args.output)
+    plot_diagnostics(model, predictors, args.log, args.output)
     return 0
 
 
