@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""OLS regression of pm25_max against aod_total and ventilation_rate.
+"""OLS regression of pm25_max against one or more predictor columns.
 
-Fits pm25_max ~ aod_total + ventilation_rate (with intercept) on the
-training table, prints the full statsmodels summary (coefficients, std
-errors, p-values, R^2), and saves a residuals-vs-fitted + Q-Q diagnostic
-plot so the fit can be checked rather than taken on faith.
+Fits pm25_max ~ predictors (with intercept) on the training table, prints
+the full statsmodels summary (coefficients, std errors, p-values, R^2),
+and saves a residuals-vs-fitted + Q-Q diagnostic plot so the fit can be
+checked rather than taken on faith.
 """
 import argparse
 from pathlib import Path
@@ -19,17 +19,17 @@ GRIDLINE = "#e1e0d9"
 MUTED = "#898781"
 INK = "#0b0b0b"
 
-PREDICTORS = ["aod_total", "ventilation_rate"]
+DEFAULT_PREDICTORS = ["aod_total", "ventilation_rate"]
 TARGET = "pm25_max"
 
 
-def fit(df: pd.DataFrame):
-    X = sm.add_constant(df[PREDICTORS])
+def fit(df: pd.DataFrame, predictors: list):
+    X = sm.add_constant(df[predictors])
     y = df[TARGET]
     return sm.OLS(y, X).fit()
 
 
-def plot_diagnostics(model, output: Path) -> None:
+def plot_diagnostics(model, predictors: list, output: Path) -> None:
     fitted = model.fittedvalues
     resid = model.resid
 
@@ -61,7 +61,8 @@ def plot_diagnostics(model, output: Path) -> None:
     ax.set_xlabel(ax.get_xlabel(), color=INK, fontsize=9)
     ax.set_ylabel(ax.get_ylabel(), color=INK, fontsize=9)
 
-    fig.suptitle("pm25_max ~ aod_total + ventilation_rate -- residual diagnostics", color=INK, fontsize=12)
+    formula = " + ".join(predictors)
+    fig.suptitle(f"pm25_max ~ {formula} -- residual diagnostics", color=INK, fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=150, facecolor=SURFACE)
@@ -72,17 +73,23 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--table", default=Path("data/training_table.csv"), type=Path)
     parser.add_argument("--output", default=Path("output/regression_diagnostics.png"), type=Path)
+    parser.add_argument(
+        "--predictors",
+        default=",".join(DEFAULT_PREDICTORS),
+        help="Comma-separated predictor column names.",
+    )
     args = parser.parse_args()
+    predictors = [c.strip() for c in args.predictors.split(",") if c.strip()]
 
     df = pd.read_csv(args.table)
-    model = fit(df)
+    model = fit(df, predictors)
 
     print(model.summary())
     print()
     print(f"n = {len(df):,}")
     print(f"Residual skew: {model.resid.skew():.2f}  (0 = symmetric; this model's target is heavily right-skewed)")
 
-    plot_diagnostics(model, args.output)
+    plot_diagnostics(model, predictors, args.output)
     return 0
 
 
