@@ -1,0 +1,62 @@
+name: PM2.5 Forecast Dashboard
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deployment at a time; let an in-flight one finish rather
+# than cancel it mid-deploy.
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Configure ADS API credentials
+        run: |
+          cat > "$HOME/.cdsapirc" <<EOF
+          url: https://ads.atmosphere.copernicus.eu/api
+          key: ${{ secrets.CDSAPI_KEY }}
+          EOF
+
+      - name: Download CAMS organic matter AOD forecast (next 3 days)
+        run: python scripts/download_cams_forecast.py --output output/cams_forecast_aod_om.nc
+
+      - name: Build forecast dashboard
+        run: |
+          python scripts/build_forecast_dashboard.py \
+            --forecast-nc output/cams_forecast_aod_om.nc \
+            --output site/index.html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
