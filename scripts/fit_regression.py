@@ -60,6 +60,26 @@ def out_of_sample_r2(model, df_eval: pd.DataFrame, predictors: list, target: str
     return 1 - ss_res / ss_tot
 
 
+def forecast(model, df_eval: pd.DataFrame, predictors: list, target: str, log: bool) -> dict:
+    """Use the (already-fit) model to predict df_eval, on the ORIGINAL target
+    scale even when the model was fit in log-log space (back-transforms via
+    exp()), and report the actual forecast errors -- MAE, RMSE, bias."""
+    if log:
+        X_log = sm.add_constant(np.log(df_eval[predictors]), has_constant="add")
+        pred = np.exp(model.predict(X_log))
+    else:
+        X = sm.add_constant(df_eval[predictors], has_constant="add")
+        pred = model.predict(X)
+    actual = df_eval[target]
+    err = actual - pred
+    return {
+        "n": len(df_eval),
+        "mae": err.abs().mean(),
+        "rmse": np.sqrt((err ** 2).mean()),
+        "bias": err.mean(),
+    }
+
+
 def plot_diagnostics(model, predictors: list, target: str, log: bool, output: Path) -> None:
     fitted = model.fittedvalues
     resid = model.resid
@@ -131,8 +151,6 @@ def main() -> int:
     if args.validate:
         train, val = chronological_split(df, args.train_frac)
         model = fit(train, predictors, args.target, args.log)
-        train_r2 = model.rsquared
-        val_r2 = out_of_sample_r2(model, val, predictors, args.target, args.log)
         print(
             f"Chronological split: train={len(train):,} rows "
             f"({train['timestamp'].min()} to {train['timestamp'].max()}), "
@@ -141,12 +159,18 @@ def main() -> int:
         print()
         print(model.summary())
         print()
-        print(f"Train R²       = {train_r2:.4f}  (n={len(train):,})")
-        print(f"Validation R²  = {val_r2:.4f}  (n={len(val):,})")
-        gap = train_r2 - val_r2
-        print(f"Gap (train - validation) = {gap:.4f}")
-        if gap > 0.05:
-            print("CAUTION: validation R² is notably lower than train -- possible overfitting or regime shift.")
+
+        train_fc = forecast(model, train, predictors, args.target, args.log)
+        val_fc = forecast(model, val, predictors, args.target, args.log)
+        unit = args.target
+        for name, fc in [("Train", train_fc), ("Validation", val_fc)]:
+            print(
+                f"{name:>10}: n={fc['n']:,}  MAE={fc['mae']:.3f} {unit}  "
+                f"RMSE={fc['rmse']:.3f} {unit}  bias={fc['bias']:+.3f} {unit}"
+            )
+        print()
+        print(f"Train R²       = {model.rsquared:.4f}")
+        print(f"Validation R²  = {out_of_sample_r2(model, val, predictors, args.target, args.log):.4f}")
     else:
         model = fit(df, predictors, args.target, args.log)
         print(model.summary())

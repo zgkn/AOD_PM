@@ -15,6 +15,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from sklearn.metrics import roc_auc_score
 from statsmodels.miscmodels.ordinal_model import OrderedModel
 
 COLOR = "#2a78d6"
@@ -52,6 +53,22 @@ def chronological_split(df: pd.DataFrame, train_frac: float):
     return df.iloc[:cut].copy(), df.iloc[cut:].copy()
 
 
+def roc_auc_per_band(probs: pd.DataFrame, actual: pd.Series) -> tuple:
+    """One-vs-rest ROC-AUC per band. A band with only one class present in
+    this split (e.g. zero positives) can't have an AUC computed -- reported
+    as None rather than silently dropped or faked."""
+    per_band = {}
+    for label in BAND_LABELS:
+        y_true = (actual == label).astype(int)
+        if y_true.nunique() < 2:
+            per_band[label] = None
+            continue
+        per_band[label] = roc_auc_score(y_true, probs[label])
+    valid = [v for v in per_band.values() if v is not None]
+    macro = float(np.mean(valid)) if valid else None
+    return per_band, macro
+
+
 def evaluate(result, df_eval: pd.DataFrame, predictor: str) -> dict:
     probs = predict_probs(result, df_eval[[predictor]])
     predicted = probs.idxmax(axis=1)
@@ -60,11 +77,14 @@ def evaluate(result, df_eval: pd.DataFrame, predictor: str) -> dict:
     # Mean log-likelihood per row of the TRUE category's predicted probability.
     true_probs = probs.to_numpy()[np.arange(len(df_eval)), actual.map(BAND_LABELS.index).to_numpy()]
     mean_ll = np.log(np.clip(true_probs, 1e-12, None)).mean()
+    auc_per_band, auc_macro = roc_auc_per_band(probs, actual)
     return {
         "n": len(df_eval),
         "accuracy": accuracy,
         "baseline_accuracy": (actual == "Normal").mean(),
         "mean_log_likelihood": mean_ll,
+        "auc_per_band": auc_per_band,
+        "auc_macro": auc_macro,
     }
 
 
@@ -154,14 +174,19 @@ def main() -> int:
         train_metrics = evaluate(result, train, args.predictor)
         val_metrics = evaluate(result, val, args.predictor)
         for name, m in [("Train", train_metrics), ("Validation", val_metrics)]:
+            macro_str = f"{m['auc_macro']:.3f}" if m["auc_macro"] is not None else "n/a"
             print(
                 f"{name:>10}: n={m['n']:,}  accuracy={m['accuracy']:.3f} "
-                f"(baseline={m['baseline_accuracy']:.3f})  mean log-lik={m['mean_log_likelihood']:.3f}"
+                f"(baseline={m['baseline_accuracy']:.3f})  macro ROC-AUC={macro_str}"
             )
-        ll_gap = train_metrics["mean_log_likelihood"] - val_metrics["mean_log_likelihood"]
-        print(f"Mean log-likelihood gap (train - validation) = {ll_gap:.3f}")
-        if ll_gap > 0.1:
-            print("CAUTION: validation fit is notably worse than train -- possible overfitting or regime shift.")
+            for label in BAND_LABELS:
+                auc = m["auc_per_band"][label]
+                auc_str = f"{auc:.3f}" if auc is not None else "n/a (only one class present in this split)"
+                print(f"            ROC-AUC [{label} vs rest] = {auc_str}")
+        print()
+        if train_metrics["auc_macro"] is not None and val_metrics["auc_macro"] is not None:
+            auc_gap = train_metrics["auc_macro"] - val_metrics["auc_macro"]
+            print(f"Macro ROC-AUC gap (train - validation) = {auc_gap:.3f}")
 
         plot_df = df
     else:
