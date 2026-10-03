@@ -28,23 +28,23 @@ MUTED = "#898781"
 INK = "#0b0b0b"
 
 DEFAULT_PREDICTORS = ["aod_total", "ventilation_rate"]
-TARGET = "pm25_max"
+DEFAULT_TARGET = "pm25_max"
 
 
-def fit(df: pd.DataFrame, predictors: list, log: bool):
+def fit(df: pd.DataFrame, predictors: list, target: str, log: bool):
     if log:
         X = sm.add_constant(np.log(df[predictors]))
-        y = np.log(df[TARGET])
+        y = np.log(df[target])
     else:
         X = sm.add_constant(df[predictors])
-        y = df[TARGET]
+        y = df[target]
     return sm.OLS(y, X).fit()
 
 
-def plot_diagnostics(model, predictors: list, log: bool, output: Path) -> None:
+def plot_diagnostics(model, predictors: list, target: str, log: bool, output: Path) -> None:
     fitted = model.fittedvalues
     resid = model.resid
-    target_label = f"log({TARGET})" if log else TARGET
+    target_label = f"log({target})" if log else target
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 5), facecolor=SURFACE)
 
@@ -91,22 +91,23 @@ def main() -> int:
         default=",".join(DEFAULT_PREDICTORS),
         help="Comma-separated predictor column names.",
     )
+    parser.add_argument("--target", default=DEFAULT_TARGET, help="Target column name.")
     parser.add_argument(
         "--log", action="store_true",
-        help="Fit log(pm25_max) ~ log(predictors) instead of the raw-value fit.",
+        help="Fit log(target) ~ log(predictors) instead of the raw-value fit.",
     )
     args = parser.parse_args()
     predictors = [c.strip() for c in args.predictors.split(",") if c.strip()]
 
     df = pd.read_csv(args.table)
-    model = fit(df, predictors, args.log)
+    model = fit(df, predictors, args.target, args.log)
 
     print(model.summary())
     print()
     print(f"n = {len(df):,}")
-    print(f"Residual skew: {model.resid.skew():.2f}  (0 = symmetric; the raw-value fit's residuals had skew 6.2)")
+    print(f"Residual skew: {model.resid.skew():.2f}")
 
-    plot_diagnostics(model, predictors, args.log, args.output)
+    plot_diagnostics(model, predictors, args.target, args.log, args.output)
     return 0
 
 
