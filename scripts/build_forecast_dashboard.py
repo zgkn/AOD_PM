@@ -19,6 +19,16 @@ model built from a synthetic 4-row dummy -- this exactly reproduces the
 real fitted model's output without needing any real data.
 
 Bands: https://www.haze.gov.sg/resources/1-hr-pm2.5-readings
+
+AOD_om input: the max over a 3x3 degree box centered on Singapore (set by
+download_cams_forecast.py), not the single Singapore grid cell -- a
+deliberate choice to account for forecast plume-position uncertainty by
+taking a regional worst case instead of betting on one exact grid cell.
+Note this does NOT match how the hardcoded coefficients above were fit:
+the training table's aod_om is a single-point reanalysis time series, not
+a regional max, so feeding a regional max into those coefficients is
+intentionally conservative/worst-case, not a statistically calibrated
+forecast for the single Singapore point.
 """
 import argparse
 import base64
@@ -66,19 +76,22 @@ def load_forecast(path: Path) -> pd.DataFrame:
 
     lat_dim = next((d for d in ("latitude", "lat") if d in ds[var].dims), None)
     lon_dim = next((d for d in ("longitude", "lon") if d in ds[var].dims), None)
-    # The download request is a small box (not a single point -- this
-    # dataset's native grid doesn't land exactly on 1.5N/103.5E), so pick
-    # the nearest actual grid point to Singapore's centroid.
-    sel = {}
-    if lat_dim is not None:
-        sel[lat_dim] = 1.5
-    if lon_dim is not None:
-        sel[lon_dim] = 103.5
-    data = ds[var].sel(**sel, method="nearest") if sel else ds[var]
-    if lat_dim is not None:
-        print(f"Nearest grid latitude to 1.5N: {float(data[lat_dim]):.3f}")
-    if lon_dim is not None:
-        print(f"Nearest grid longitude to 103.5E: {float(data[lon_dim]):.3f}")
+    spatial_dims = [d for d in (lat_dim, lon_dim) if d is not None]
+
+    data = ds[var]
+    if spatial_dims:
+        n_cells = 1
+        for d in spatial_dims:
+            n_cells *= data.sizes[d]
+        lat_lo, lat_hi = float(ds[lat_dim].min()), float(ds[lat_dim].max())
+        lon_lo, lon_hi = float(ds[lon_dim].min()), float(ds[lon_dim].max())
+        print(
+            f"Taking max AOD_om over {n_cells} grid cells "
+            f"(lat {lat_lo:.1f} to {lat_hi:.1f}, lon {lon_lo:.1f} to {lon_hi:.1f}) "
+            "per timestep -- a regional max to account for forecast "
+            "plume-position uncertainty, not the single Singapore grid cell."
+        )
+        data = data.max(dim=spatial_dims)
 
     # Forecast-type CAMS output carries a reference time + a leadtime
     # timedelta (named "step" or "forecast_period" depending on how it was
@@ -147,7 +160,10 @@ def render_chart(df: pd.DataFrame) -> str:
     style(ax)
     ax.plot(x, df["aod_om"], color=AOD_COLOR, linewidth=2, marker="o", markersize=3, zorder=2)
     ax.set_ylabel("Organic matter AOD", color=INK, fontsize=9)
-    ax.set_title("CAMS forecast: organic matter AOD, next 3 days", color=INK, fontsize=11, loc="left")
+    ax.set_title(
+        "CAMS forecast: max organic matter AOD over Singapore region, next 3 days",
+        color=INK, fontsize=11, loc="left",
+    )
 
     ax = axes[1]
     style(ax)
@@ -216,7 +232,7 @@ def render_html(df: pd.DataFrame, chart_b64: str, generated_at: datetime) -> str
 <body>
   <h1>Singapore PM2.5 -- 3-day forecast</h1>
   <div class="meta">
-    Forecast grid cell: 1.5&deg;N, 103.5&deg;E (nearest native CAMS/ERA5 point to Singapore's centroid)
+    AOD_om: max over a 3&deg;&times;3&deg; box centered on Singapore (1.5&deg;N, 103.5&deg;E), to account for forecast plume-position uncertainty
     &middot; Generated {generated_at.strftime('%Y-%m-%d %H:%M UTC')}
   </div>
 

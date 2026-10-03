@@ -3,7 +3,11 @@
 
 Dataset: cams-global-atmospheric-composition-forecasts
 Variable: organic_matter_aerosol_optical_depth_550nm
-Same single grid cell as the EAC4/ERA5 pulls: 1.5N, 103.5E.
+Downloads a 3x3 degree box centered on 1.5N/103.5E (the EAC4/ERA5 grid
+point used elsewhere in this project) rather than a single grid cell --
+build_forecast_dashboard.py takes the max AOD_om over this box per
+timestep, to account for forecast plume-position uncertainty rather than
+betting on one exact grid cell.
 Leadtime: 0..72h step 3 (3-hourly, matching the training data's cadence).
 
 Forecast cycles (00Z) take a few hours to publish after the cycle time, so
@@ -23,12 +27,16 @@ import cdsapi
 DATASET = "cams-global-atmospheric-composition-forecasts"
 VARIABLE = "organic_matter_aerosol_optical_depth_550nm"
 
-# A single-point box ([1.5, 103.5, 1.5, 103.5], exact on the EAC4/ERA5
-# grids) gets rejected by this dataset with "area contains no grid points" --
-# its native grid doesn't land exactly on 1.5N/103.5E. Request a small box
-# around it instead and pick the nearest point out of the result at
-# analysis time (build_forecast_dashboard.py), [North, West, South, East].
-AREA = [2.5, 102.5, 0.5, 104.5]
+# 3x3 degree box centered on 1.5N/103.5E, [North, West, South, East].
+# On this dataset's native ~0.4 degree grid that's roughly an 8x8 cell
+# region (~330km x 330km), covering Singapore, Johor, the Riau Islands,
+# and part of Sumatra's east coast -- wide enough to capture a forecast
+# smoke plume landing a bit off from the exact Singapore grid cell, while
+# still regional rather than picking up unrelated distant fire sources.
+# (A degenerate single-point box also doesn't work here: this dataset's
+# native grid doesn't land exactly on 1.5N/103.5E, so even the old
+# single-cell version needed a small box just to get a hit.)
+AREA = [3.0, 102.0, 0.0, 105.0]
 BASE_TIME = "00:00"
 LEADTIME_HOURS = [str(h) for h in range(0, 73, 3)]
 
