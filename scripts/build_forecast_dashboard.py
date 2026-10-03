@@ -36,6 +36,7 @@ import io
 from datetime import datetime, timezone
 from pathlib import Path
 
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -144,7 +145,7 @@ def compute_predictions(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def render_chart(df: pd.DataFrame) -> str:
-    fig, axes = plt.subplots(3, 1, figsize=(10, 10), facecolor=SURFACE, sharex=True)
+    fig, axes = plt.subplots(3, 1, figsize=(10, 10.8), facecolor=SURFACE, sharex=True)
 
     def style(ax):
         ax.set_facecolor(SURFACE)
@@ -186,10 +187,26 @@ def render_chart(df: pd.DataFrame) -> str:
     ax.set_ylim(0, 1)
     ax.set_ylabel("Predicted band probability", color=INK, fontsize=9)
     ax.set_xlabel("Forecast valid time (UTC)", color=INK, fontsize=9)
-    ax.set_title("Ordinal logistic regression: predicted PM2.5 band probability", color=INK, fontsize=11, loc="left")
-    legend = ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=4, frameon=False, fontsize=9)
+    # pad pushes the title up so the legend (anchored just above the axes)
+    # sits between the title and the plot, not on top of either.
+    ax.set_title(
+        "Ordinal logistic regression: predicted PM2.5 band probability",
+        color=INK, fontsize=11, loc="left", pad=28,
+    )
+    legend = ax.legend(
+        loc="lower left", bbox_to_anchor=(0, 1.02, 1, 0.1), ncol=4,
+        frameon=False, fontsize=9, mode="expand",
+    )
     for text in legend.get_texts():
         text.set_color(INK)
+
+    # Hour-level ticks (default date-only locator is too coarse over a
+    # 5-day, 3-hourly series); every 12h keeps labels readable at this size.
+    locator = mdates.HourLocator(interval=12)
+    formatter = mdates.DateFormatter("%m/%d %H:%M")
+    for ax in axes:
+        ax.xaxis.set_major_locator(locator)
+        ax.xaxis.set_major_formatter(formatter)
 
     fig.autofmt_xdate()
     fig.tight_layout()
