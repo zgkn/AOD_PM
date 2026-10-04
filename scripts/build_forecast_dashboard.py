@@ -145,7 +145,12 @@ def compute_predictions(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def render_chart(df: pd.DataFrame) -> str:
-    fig, axes = plt.subplots(3, 1, figsize=(10, 10.8), facecolor=SURFACE, sharex=True)
+    # 2 full-size panels (AOD, linear PM2.5) + 4 thin small-multiples panels,
+    # one per band -- see band-probability loop below.
+    fig, axes = plt.subplots(
+        6, 1, figsize=(10, 14), facecolor=SURFACE, sharex=True,
+        gridspec_kw={"height_ratios": [3, 3, 1, 1, 1, 1]},
+    )
 
     def style(ax):
         ax.set_facecolor(SURFACE)
@@ -177,28 +182,33 @@ def render_chart(df: pd.DataFrame) -> str:
         color=INK, fontsize=11, loc="left",
     )
 
-    ax = axes[2]
-    style(ax)
-    ax.stackplot(
-        x, [df[label] for label in BAND_LABELS],
-        colors=[BAND_COLORS[label] for label in BAND_LABELS],
-        labels=BAND_LABELS, alpha=0.85, zorder=2,
+    # Small multiples: one thin panel per band instead of a single stacked
+    # area. Each panel y-autoscales to its own value range (with padding)
+    # rather than a shared 0-1 axis, so small probabilities (e.g. a 2% High
+    # chance) are actually visible instead of a sliver at the bottom of a
+    # stack -- the trade-off is panels aren't directly comparable by eye at
+    # a glance, only by reading their y-axis values. Each panel is labeled
+    # inline in its own band color, so no shared legend is needed at all.
+    band_axes = axes[2:6]
+    for ax, label in zip(band_axes, BAND_LABELS):
+        style(ax)
+        color = BAND_COLORS[label]
+        ax.fill_between(x, df[label], color=color, alpha=0.35, zorder=2)
+        ax.plot(x, df[label], color=color, linewidth=1.5, zorder=3)
+        lo, hi = float(df[label].min()), float(df[label].max())
+        pad = max((hi - lo) * 0.15, 0.02)
+        ax.set_ylim(max(lo - pad, 0.0), min(hi + pad, 1.0))
+        ax.set_ylabel("Prob.", color=INK, fontsize=8)
+        ax.text(
+            0.01, 0.85, label, transform=ax.transAxes,
+            color=color, fontsize=9, fontweight="bold", va="top",
+        )
+
+    band_axes[0].set_title(
+        "Ordinal logistic regression: predicted PM2.5 band probability (per-band detail)",
+        color=INK, fontsize=11, loc="left", pad=10,
     )
-    ax.set_ylim(0, 1)
-    ax.set_ylabel("Predicted band probability", color=INK, fontsize=9)
-    ax.set_xlabel("Forecast valid time (UTC)", color=INK, fontsize=9)
-    # pad pushes the title up so the legend (anchored just above the axes)
-    # sits between the title and the plot, not on top of either.
-    ax.set_title(
-        "Ordinal logistic regression: predicted PM2.5 band probability",
-        color=INK, fontsize=11, loc="left", pad=28,
-    )
-    legend = ax.legend(
-        loc="lower left", bbox_to_anchor=(0, 1.02, 1, 0.1), ncol=4,
-        frameon=False, fontsize=9, mode="expand",
-    )
-    for text in legend.get_texts():
-        text.set_color(INK)
+    band_axes[-1].set_xlabel("Forecast valid time (UTC)", color=INK, fontsize=9)
 
     # Hour-level ticks (default date-only locator is too coarse over a
     # 5-day, 3-hourly series); every 12h keeps labels readable at this size.
