@@ -29,15 +29,16 @@ the training table's aod_om is a single-point reanalysis time series, not
 a regional max, so feeding a regional max into those coefficients is
 intentionally conservative/worst-case, not a statistically calibrated
 forecast for the single Singapore point.
+
+Chart is rendered client-side with Plotly.js (CDN), not a static image:
+pan/zoom (box-drag or scroll-wheel), hover tooltips with exact values, and
+a synced x-axis across all 6 panels so zooming one zooms all of them.
 """
 import argparse
-import base64
-import io
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-import matplotlib.dates as mdates
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -66,6 +67,8 @@ MUTED = "#898781"
 INK = "#0b0b0b"
 
 AOD_VAR_CANDIDATES = ("omaod550", "organic_matter_aerosol_optical_depth_550nm")
+
+DATE_TICKFORMAT = "%Y-%m-%d %H:%M"  # ISO-style; applies to axis ticks and hover
 
 
 def load_forecast(path: Path) -> pd.DataFrame:
@@ -144,102 +147,169 @@ def compute_predictions(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def render_chart(df: pd.DataFrame) -> str:
-    # 2 full-size panels (AOD, linear PM2.5) + 4 thin small-multiples panels,
-    # one per band -- see band-probability loop below.
-    fig, axes = plt.subplots(
-        6, 1, figsize=(10, 14), facecolor=SURFACE, sharex=True,
-        gridspec_kw={"height_ratios": [3, 3, 1, 1, 1, 1]},
-    )
+def _hex_to_rgba(hex_color: str, alpha: float) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alpha})"
 
-    def style(ax):
-        ax.set_facecolor(SURFACE)
-        for spine in ax.spines.values():
-            spine.set_visible(False)
-        ax.tick_params(colors=MUTED, labelsize=8, length=0)
-        ax.grid(True, color=GRIDLINE, linewidth=0.8, zorder=0)
-        ax.set_axisbelow(True)
 
-    x = df["valid_time"]
+def _row_domains(weights: list[float], gap: float = 0.045) -> list[tuple[float, float]]:
+    """Top-to-bottom y-domains for stacked subplots, like a matplotlib
+    gridspec height_ratios layout."""
+    total = sum(weights)
+    n = len(weights)
+    avail = 1 - gap * (n - 1)
+    domains = []
+    y_top = 1.0
+    for w in weights:
+        h = avail * w / total
+        y_bottom = y_top - h
+        domains.append((round(y_bottom, 6), round(y_top, 6)))
+        y_top = y_bottom - gap
+    return domains
 
-    ax = axes[0]
-    style(ax)
-    ax.plot(x, df["aod_om"], color=AOD_COLOR, linewidth=2, marker="o", markersize=3, zorder=2)
-    ax.set_ylabel("Organic matter AOD", color=INK, fontsize=9)
-    ax.set_title(
-        "CAMS forecast: max organic matter AOD over Singapore region, next 5 days",
-        color=INK, fontsize=11, loc="left",
-    )
 
-    ax = axes[1]
-    style(ax)
+def build_figure(df: pd.DataFrame) -> dict:
+    """Plotly.js figure spec (data + layout) for the 6-panel dashboard:
+    AOD, linear PM2.5 estimate, and one small-multiple per band probability.
+    All panels share a synced, zoomable/pannable x-axis; every y-axis is
+    pinned to start at 0 (rangemode='tozero')."""
+    times = [t.isoformat() for t in df["valid_time"]]
+    domains = _row_domains([3, 3, 1, 1, 1, 1])
+    axis_ids = ["", "2", "3", "4", "5", "6"]  # Plotly: '', '2', '3', ... for x/y/xaxis/yaxis keys
+
+    base_axis = {
+        "type": "date",
+        "tickformat": DATE_TICKFORMAT,
+        "gridcolor": GRIDLINE,
+        "linecolor": GRIDLINE,
+        "tickfont": {"size": 10, "color": MUTED},
+        "showline": True,
+        "zeroline": False,
+    }
+
+    layout = {
+        "paper_bgcolor": SURFACE,
+        "plot_bgcolor": SURFACE,
+        "font": {"color": INK, "family": "system-ui, -apple-system, Segoe UI, sans-serif"},
+        "margin": {"l": 60, "r": 20, "t": 50, "b": 60},
+        "showlegend": False,
+        "dragmode": "zoom",
+        "hovermode": "closest",
+        "annotations": [],
+        "shapes": [],
+    }
+
+    data = []
+
+    # Panel 1: AOD_om
+    aid = axis_ids[0]
+    y0, y1 = domains[0]
+    layout[f"xaxis{aid}"] = {**base_axis, "domain": [0, 1], "anchor": f"y{aid}", "showticklabels": False}
+    layout[f"yaxis{aid}"] = {
+        "domain": [y0, y1], "anchor": f"x{aid}", "rangemode": "tozero",
+        "title": {"text": "Organic matter AOD", "font": {"size": 11, "color": INK}},
+        "gridcolor": GRIDLINE, "tickfont": {"size": 10, "color": MUTED},
+    }
+    data.append({
+        "type": "scatter", "mode": "lines+markers", "x": times, "y": df["aod_om"].round(4).tolist(),
+        "line": {"color": AOD_COLOR, "width": 2}, "marker": {"size": 4, "color": AOD_COLOR},
+        "xaxis": f"x{aid}", "yaxis": f"y{aid}",
+        "hovertemplate": f"%{{x|{DATE_TICKFORMAT}}}<br>AOD_om: %{{y:.3f}}<extra></extra>",
+    })
+    layout["annotations"].append({
+        "text": "CAMS forecast: max organic matter AOD over Singapore region, next 5 days",
+        "xref": "paper", "yref": "paper", "x": 0, "y": y1 + 0.028,
+        "xanchor": "left", "yanchor": "bottom", "showarrow": False,
+        "font": {"size": 13, "color": INK},
+    })
+
+    # Panel 2: linear PM2.5 estimate, with haze.gov.sg band-boundary lines
+    aid = axis_ids[1]
+    y0, y1 = domains[1]
+    layout[f"xaxis{aid}"] = {**base_axis, "domain": [0, 1], "anchor": f"y{aid}", "matches": "x", "showticklabels": False}
+    layout[f"yaxis{aid}"] = {
+        "domain": [y0, y1], "anchor": f"x{aid}", "rangemode": "tozero",
+        "title": {"text": "Predicted PM2.5 (µg/m³)", "font": {"size": 11, "color": INK}},
+        "gridcolor": GRIDLINE, "tickfont": {"size": 10, "color": MUTED},
+    }
+    data.append({
+        "type": "scatter", "mode": "lines+markers", "x": times, "y": df["pm25_linear"].round(2).tolist(),
+        "line": {"color": INK, "width": 2}, "marker": {"size": 4, "color": INK},
+        "xaxis": f"x{aid}", "yaxis": f"y{aid}",
+        "hovertemplate": f"%{{x|{DATE_TICKFORMAT}}}<br>PM2.5: %{{y:.1f}} µg/m³<extra></extra>",
+    })
     for edge, label in zip(BAND_EDGES[1:-1], BAND_LABELS[1:]):
-        ax.axhline(edge, color=BAND_COLORS[label], linewidth=1, linestyle="--", alpha=0.6, zorder=1)
-    ax.plot(x, df["pm25_linear"], color=INK, linewidth=2, marker="o", markersize=3, zorder=2)
-    ax.set_ylabel("Predicted PM2.5 (µg/m³)", color=INK, fontsize=9)
-    ax.set_title(
-        "Linear regression estimate (dashed lines = haze.gov.sg band boundaries)",
-        color=INK, fontsize=11, loc="left",
-    )
+        layout["shapes"].append({
+            "type": "line", "xref": f"x{aid} domain", "yref": f"y{aid}",
+            "x0": 0, "x1": 1, "y0": edge, "y1": edge,
+            "line": {"color": BAND_COLORS[label], "width": 1, "dash": "dash"}, "opacity": 0.6,
+        })
+    layout["annotations"].append({
+        "text": "Linear regression estimate (dashed lines = haze.gov.sg band boundaries)",
+        "xref": "paper", "yref": "paper", "x": 0, "y": y1 + 0.028,
+        "xanchor": "left", "yanchor": "bottom", "showarrow": False,
+        "font": {"size": 13, "color": INK},
+    })
 
-    # Small multiples: one thin panel per band instead of a single stacked
-    # area. Each panel y-autoscales to its own value range (with padding)
-    # rather than a shared 0-1 axis, so small probabilities (e.g. a 2% High
-    # chance) are actually visible instead of a sliver at the bottom of a
-    # stack -- the trade-off is panels aren't directly comparable by eye at
-    # a glance, only by reading their y-axis values. Each panel is labeled
-    # inline in its own band color, so no shared legend is needed at all.
-    band_axes = axes[2:6]
-    for ax, label in zip(band_axes, BAND_LABELS):
-        style(ax)
+    # Panels 3-6: one small multiple per band probability, inline-labeled
+    for i, label in enumerate(BAND_LABELS):
+        aid = axis_ids[2 + i]
+        y0, y1 = domains[2 + i]
         color = BAND_COLORS[label]
-        ax.fill_between(x, df[label], color=color, alpha=0.35, zorder=2)
-        ax.plot(x, df[label], color=color, linewidth=1.5, zorder=3)
-        lo, hi = float(df[label].min()), float(df[label].max())
-        pad = max((hi - lo) * 0.15, 0.02)
-        ax.set_ylim(max(lo - pad, 0.0), min(hi + pad, 1.0))
-        ax.set_ylabel("Prob.", color=INK, fontsize=8)
-        ax.text(
-            0.01, 0.85, label, transform=ax.transAxes,
-            color=color, fontsize=9, fontweight="bold", va="top",
-        )
+        is_last = i == len(BAND_LABELS) - 1
+        layout[f"xaxis{aid}"] = {
+            **base_axis, "domain": [0, 1], "anchor": f"y{aid}", "matches": "x",
+            "showticklabels": is_last,
+            **({"title": {"text": "Forecast valid time (UTC)", "font": {"size": 11, "color": INK}}} if is_last else {}),
+        }
+        layout[f"yaxis{aid}"] = {
+            "domain": [y0, y1], "anchor": f"x{aid}", "rangemode": "tozero",
+            "title": {"text": "Prob.", "font": {"size": 9, "color": INK}},
+            "gridcolor": GRIDLINE, "tickfont": {"size": 9, "color": MUTED},
+        }
+        data.append({
+            "type": "scatter", "mode": "lines", "x": times, "y": df[label].round(4).tolist(),
+            "line": {"color": color, "width": 1.5}, "fill": "tozeroy", "fillcolor": _hex_to_rgba(color, 0.35),
+            "xaxis": f"x{aid}", "yaxis": f"y{aid}",
+            "hovertemplate": f"%{{x|{DATE_TICKFORMAT}}}<br>{label}: %{{y:.1%}}<extra></extra>",
+        })
+        layout["annotations"].append({
+            "text": label, "xref": f"x{aid} domain", "yref": f"y{aid} domain",
+            "x": 0.01, "y": 0.85, "xanchor": "left", "yanchor": "top", "showarrow": False,
+            "font": {"size": 11, "color": color, "family": "system-ui, sans-serif"},
+        })
+        if i == 0:
+            layout["annotations"].append({
+                "text": "Ordinal logistic regression: predicted PM2.5 band probability (per-band detail)",
+                "xref": "paper", "yref": "paper", "x": 0, "y": y1 + 0.028,
+                "xanchor": "left", "yanchor": "bottom", "showarrow": False,
+                "font": {"size": 13, "color": INK},
+            })
 
-    band_axes[0].set_title(
-        "Ordinal logistic regression: predicted PM2.5 band probability (per-band detail)",
-        color=INK, fontsize=11, loc="left", pad=10,
-    )
-    band_axes[-1].set_xlabel("Forecast valid time (UTC)", color=INK, fontsize=9)
-
-    # Hour-level ticks (default date-only locator is too coarse over a
-    # 5-day, 3-hourly series); every 12h keeps labels readable at this size.
-    locator = mdates.HourLocator(interval=12)
-    formatter = mdates.DateFormatter("%m/%d %H:%M")
-    for ax in axes:
-        ax.xaxis.set_major_locator(locator)
-        ax.xaxis.set_major_formatter(formatter)
-
-    fig.autofmt_xdate()
-    fig.tight_layout()
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, facecolor=SURFACE, bbox_inches="tight")
-    plt.close(fig)
-    return base64.b64encode(buf.getvalue()).decode("ascii")
+    return {"data": data, "layout": layout}
 
 
-def render_html(df: pd.DataFrame, chart_b64: str, generated_at: datetime) -> str:
+def render_html(df: pd.DataFrame, figure: dict, generated_at: datetime) -> str:
+    figure_json = json.dumps(figure)
+    config_json = json.dumps({
+        "responsive": True, "scrollZoom": True, "displaylogo": False,
+        "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+    })
     html = f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Singapore PM2.5 5-day forecast</title>
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2/plotly.min.js"></script>
 <style>
   body {{ font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: {SURFACE}; color: {INK};
-          max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }}
+          max-width: 1000px; margin: 0 auto; padding: 24px 16px 48px; }}
   h1 {{ font-size: 1.4rem; margin-bottom: 4px; }}
   .meta {{ color: {MUTED}; font-size: 0.9rem; margin-bottom: 24px; }}
-  img {{ width: 100%; height: auto; border-radius: 8px; border: 1px solid {GRIDLINE}; }}
+  .hint {{ color: {MUTED}; font-size: 0.8rem; margin-bottom: 12px; }}
+  #chart {{ width: 100%; height: 980px; border-radius: 8px; border: 1px solid {GRIDLINE}; background: {SURFACE}; }}
   footer {{ color: {MUTED}; font-size: 0.8rem; margin-top: 24px; }}
   a {{ color: {AOD_COLOR}; }}
 </style>
@@ -250,8 +320,13 @@ def render_html(df: pd.DataFrame, chart_b64: str, generated_at: datetime) -> str
     AOD_om: max over a 3&deg;&times;3&deg; box centered on Singapore (1.5&deg;N, 103.5&deg;E), to account for forecast plume-position uncertainty
     &middot; Generated {generated_at.strftime('%Y-%m-%d %H:%M UTC')}
   </div>
+  <div class="hint">Drag to zoom, scroll to zoom, double-click to reset, hover for exact values.</div>
 
-  <img src="data:image/png;base64,{chart_b64}" alt="5-day AOD and PM2.5 forecast chart">
+  <div id="chart"></div>
+  <script>
+    const FORECAST_FIGURE = {figure_json};
+    Plotly.newPlot("chart", FORECAST_FIGURE.data, FORECAST_FIGURE.layout, {config_json});
+  </script>
 
   <footer>
     Models fit once on 34,346 historical observations (2014-03-31 to 2025-12-31) from EAC4/ERA5
@@ -277,8 +352,8 @@ def main() -> int:
     df = compute_predictions(df)
     print(df[["valid_time", "aod_om", "pm25_linear", "pm25_band"]].to_string(index=False))
 
-    chart_b64 = render_chart(df)
-    html = render_html(df, chart_b64, datetime.now(timezone.utc))
+    figure = build_figure(df)
+    html = render_html(df, figure, datetime.now(timezone.utc))
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(html)
