@@ -183,25 +183,40 @@ def compute_predictions(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def load_training_sample(path: Path, n: int = 3000, seed: int = 42) -> pd.DataFrame:
+    """A random sample of (aod_om, pm25_mean, pm25_max) from the full
+    training table, for the historical-regression scatter panels --
+    plotting all 34,346 rows would bloat the page and slow down
+    rendering for no visible gain in density."""
+    full = pd.read_csv(path, usecols=["aod_om", "pm25_mean", "pm25_max"]).dropna()
+    sample = full.sample(n=min(n, len(full)), random_state=seed)
+    return sample.reset_index(drop=True)
+
+
 def _hex_to_rgba(hex_color: str, alpha: float) -> str:
     h = hex_color.lstrip("#")
     r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
     return f"rgba({r},{g},{b},{alpha})"
 
 
-def _row_domains(weights: list[float], gap: float = 0.03) -> list[tuple[float, float]]:
+def _row_domains(weights: list[float], gap: float | list[float] = 0.03) -> list[tuple[float, float]]:
     """Top-to-bottom y-domains for stacked subplots, like a matplotlib
-    gridspec height_ratios layout."""
-    total = sum(weights)
+    gridspec height_ratios layout. `gap` is either one fraction reused
+    between every pair of rows, or a list of len(weights)-1 fractions for
+    when one boundary (e.g. between two unrelated axis groups, each with
+    its own tick labels/title crowding that gap) needs more room than the
+    rest."""
     n = len(weights)
-    avail = 1 - gap * (n - 1)
+    gaps = [gap] * (n - 1) if isinstance(gap, (int, float)) else list(gap)
+    avail = 1 - sum(gaps)
+    total = sum(weights)
     domains = []
     y_top = 1.0
-    for w in weights:
+    for i, w in enumerate(weights):
         h = avail * w / total
         y_bottom = y_top - h
         domains.append((round(y_bottom, 6), round(y_top, 6)))
-        y_top = y_bottom - gap
+        y_top = y_bottom - (gaps[i] if i < len(gaps) else 0)
     return domains
 
 
@@ -297,16 +312,119 @@ def _band_panels(
             })
 
 
-def build_figure(df: pd.DataFrame) -> dict:
-    """Plotly.js figure spec (data + layout) for the 6-panel dashboard:
-    AOD, a linear-estimate panel, and 4 per-band probability panels --
-    each of the latter 5 overlays pm25_mean (solid) and pm25_max (dashed)
-    in the same panel rather than as separate tracks. Every panel shares
-    one synced, zoomable/pannable time x-axis, and every y-axis is
-    pinned to start at 0 (rangemode='tozero')."""
+def _regression_scatter_panel(
+    data: list, layout: dict, aid: str, domain: tuple, aod_axis: dict,
+    training_sample: pd.DataFrame, x_grid: np.ndarray,
+) -> None:
+    """Historical pm25 ~ aod_om scatter (both targets) + both fit lines,
+    same solid=mean/dashed=max convention as the forecast panels above."""
+    y0, y1 = domain
+    layout[f"xaxis{aid}"] = {**aod_axis, "domain": [0, 1], "anchor": f"y{aid}", "showticklabels": False}
+    layout[f"yaxis{aid}"] = {
+        "domain": [y0, y1], "anchor": f"x{aid}", "rangemode": "tozero",
+        "title": {"text": "Historical PM2.5 (µg/m³)", "font": {"size": 11, "color": INK}},
+        "gridcolor": GRIDLINE, "tickfont": {"size": 10, "color": MUTED},
+    }
+    data.append({
+        "type": "scatter", "mode": "markers", "x": training_sample["aod_om"].round(4).tolist(),
+        "y": training_sample["pm25_mean"].round(2).tolist(),
+        "marker": {"size": 4, "color": _hex_to_rgba(MUTED, 0.25)},
+        "xaxis": f"x{aid}", "yaxis": f"y{aid}",
+        "hovertemplate": "Historical<br>AOD_om: %{x:.3f}<br>PM2.5 mean: %{y:.1f} µg/m³<extra></extra>",
+    })
+    data.append({
+        "type": "scatter", "mode": "markers", "x": training_sample["aod_om"].round(4).tolist(),
+        "y": training_sample["pm25_max"].round(2).tolist(),
+        "marker": {"size": 4, "color": _hex_to_rgba(MUTED, 0.45)},
+        "xaxis": f"x{aid}", "yaxis": f"y{aid}",
+        "hovertemplate": "Historical<br>AOD_om: %{x:.3f}<br>PM2.5 max: %{y:.1f} µg/m³<extra></extra>",
+    })
+    data.append({
+        "type": "scatter", "mode": "lines", "x": x_grid.round(4).tolist(),
+        "y": (LINEAR_INTERCEPT + LINEAR_SLOPE * x_grid).round(2).tolist(),
+        "line": {"color": INK, "width": 2}, "xaxis": f"x{aid}", "yaxis": f"y{aid}", "hoverinfo": "skip",
+    })
+    data.append({
+        "type": "scatter", "mode": "lines", "x": x_grid.round(4).tolist(),
+        "y": (PM25MAX_LINEAR_INTERCEPT + PM25MAX_LINEAR_SLOPE * x_grid).round(2).tolist(),
+        "line": {"color": INK, "width": 2, "dash": "dash"}, "xaxis": f"x{aid}", "yaxis": f"y{aid}", "hoverinfo": "skip",
+    })
+    layout["annotations"].append({
+        "text": "— PM2.5 mean fit", "xref": f"x{aid} domain", "yref": f"y{aid} domain",
+        "x": 0.01, "y": 0.97, "xanchor": "left", "yanchor": "top", "showarrow": False,
+        "font": {"size": 10, "color": INK, "family": "system-ui, sans-serif"},
+    })
+    layout["annotations"].append({
+        "text": "- - PM2.5 max fit", "xref": f"x{aid} domain", "yref": f"y{aid} domain",
+        "x": 0.01, "y": 0.88, "xanchor": "left", "yanchor": "top", "showarrow": False,
+        "font": {"size": 10, "color": INK, "family": "system-ui, sans-serif"},
+    })
+    layout["annotations"].append({
+        "text": "Linear regression: historical PM2.5 vs AOD_om (points) with the fitted line",
+        "xref": "paper", "yref": "paper", "x": 0, "y": y1 + 0.022,
+        "xanchor": "left", "yanchor": "bottom", "showarrow": False,
+        "font": {"size": 13, "color": INK},
+    })
+
+
+def _regression_curve_panel(
+    data: list, layout: dict, aid: str, master_aid: str, domain: tuple, aod_axis: dict, x_grid: np.ndarray,
+) -> None:
+    """Ordinal logistic band-probability curves vs aod_om, both targets
+    overlaid (mean solid, max dashed) per band color."""
+    y0, y1 = domain
+    layout[f"xaxis{aid}"] = {
+        **aod_axis, "matches": f"x{master_aid}", "domain": [0, 1], "anchor": f"y{aid}", "showticklabels": True,
+        "title": {"text": "Organic matter AOD", "font": {"size": 11, "color": INK}},
+    }
+    layout[f"yaxis{aid}"] = {
+        "domain": [y0, y1], "anchor": f"x{aid}", "range": [0, 1],
+        "title": {"text": "Predicted probability", "font": {"size": 10, "color": INK}},
+        "gridcolor": GRIDLINE, "tickfont": {"size": 9, "color": MUTED},
+    }
+    mean_probs = predict_ordinal_probs(pd.Series(x_grid))
+    max_probs = predict_ordinal_probs(pd.Series(x_grid), PM25MAX_ORDINAL_PARAMS)
+    for label in BAND_LABELS:
+        color = BAND_COLORS[label]
+        data.append({
+            "type": "scatter", "mode": "lines", "x": x_grid.round(4).tolist(), "y": mean_probs[label].round(4).tolist(),
+            "line": {"color": color, "width": 2},
+            "xaxis": f"x{aid}", "yaxis": f"y{aid}",
+            "hovertemplate": f"AOD_om: %{{x:.3f}}<br>{label} (mean): %{{y:.1%}}<extra></extra>",
+        })
+        data.append({
+            "type": "scatter", "mode": "lines", "x": x_grid.round(4).tolist(), "y": max_probs[label].round(4).tolist(),
+            "line": {"color": color, "width": 2, "dash": "dash"},
+            "xaxis": f"x{aid}", "yaxis": f"y{aid}",
+            "hovertemplate": f"AOD_om: %{{x:.3f}}<br>{label} (max): %{{y:.1%}}<extra></extra>",
+        })
+    layout["annotations"].append({
+        "text": "Ordinal logistic: band probability vs AOD_om (solid = PM2.5 mean, dashed = PM2.5 max)",
+        "xref": "paper", "yref": "paper", "x": 0, "y": y1 + 0.022,
+        "xanchor": "left", "yanchor": "bottom", "showarrow": False,
+        "font": {"size": 13, "color": INK},
+    })
+
+
+def build_figure(df: pd.DataFrame, training_sample: pd.DataFrame) -> dict:
+    """Plotly.js figure spec (data + layout) for the 8-panel dashboard:
+    6 forecast panels (AOD, a linear-estimate panel, and 4 per-band
+    probability panels -- each of the latter 5 overlays pm25_mean/solid
+    and pm25_max/dashed in the same panel) sharing one synced time
+    x-axis, plus 2 regression-result panels (historical scatter + fit
+    line, and ordinal logistic probability curves, both vs aod_om, both
+    overlaying mean/max the same way) sharing their own synced,
+    independent aod_om x-axis. Every y-axis is pinned to start at 0
+    (rangemode='tozero' for the forecast panels; [0,1] fixed for the
+    probability panels)."""
     times = [t.isoformat() for t in df["valid_time"]]
-    weights = [3, 3, 1, 1, 1, 1]
-    domains = _row_domains(weights)
+    # Extra-wide gap between panel 6 (end of the time-axis group, which
+    # carries its own rotated date tick labels + x-axis title) and panel 7
+    # (start of the aod_om-axis group, which has its own title) -- the
+    # standard gap is too tight for both of those to fit without colliding.
+    weights = [3, 3, 1, 1, 1, 1, 3, 3]
+    gaps = [0.03] * 5 + [0.07] + [0.03]
+    domains = _row_domains(weights, gap=gaps)
     axis_ids = [""] + [str(i) for i in range(2, len(weights) + 1)]
 
     layout = {
@@ -358,6 +476,21 @@ def build_figure(df: pd.DataFrame) -> dict:
         data, layout, axis_ids[2:6], domains[2:6], times, df,
         group_title="Ordinal logistic regression: predicted PM2.5 band probability (per-band detail)",
     )
+
+    # Panels 7-8: regression-result panels (historical scatter+fit line,
+    # ordinal probability curves), sharing their own synced aod_om x-axis --
+    # independent of the time axis used by panels 1-6. The grid spans
+    # whichever is wider, historical aod_om or this forecast's aod_om, so the
+    # fit lines/curves cover the forecast's actual range too.
+    x_max = float(max(training_sample["aod_om"].max(), df["aod_om"].max())) * 1.05
+    x_grid = np.linspace(0, x_max, 200)
+    aod_axis = {
+        "gridcolor": GRIDLINE, "linecolor": GRIDLINE, "tickfont": {"size": 10, "color": MUTED},
+        "showline": True, "zeroline": False,
+    }
+    master_aid = axis_ids[6]
+    _regression_scatter_panel(data, layout, master_aid, domains[6], aod_axis, training_sample, x_grid)
+    _regression_curve_panel(data, layout, axis_ids[7], master_aid, domains[7], aod_axis, x_grid)
 
     return {"data": data, "layout": layout}
 
@@ -433,7 +566,7 @@ def render_html(df: pd.DataFrame, figure: dict, generated_at: datetime) -> str:
   h2 {{ font-size: 1.1rem; margin: 32px 0 12px; }}
   .meta {{ color: {MUTED}; font-size: 0.9rem; margin-bottom: 24px; }}
   .hint {{ color: {MUTED}; font-size: 0.8rem; margin-bottom: 12px; }}
-  #chart {{ width: 100%; height: 1050px; border-radius: 8px; border: 1px solid {GRIDLINE}; background: {SURFACE}; }}
+  #chart {{ width: 100%; height: 1550px; border-radius: 8px; border: 1px solid {GRIDLINE}; background: {SURFACE}; }}
   table.models {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; background: #fff;
                   border: 1px solid {GRIDLINE}; border-radius: 8px; overflow: hidden; }}
   table.models th, table.models td {{ text-align: left; padding: 10px 12px; border-bottom: 1px solid {GRIDLINE}; }}
@@ -475,6 +608,7 @@ def render_html(df: pd.DataFrame, figure: dict, generated_at: datetime) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--forecast-nc", default=Path("output/cams_forecast_aod_om.nc"), type=Path)
+    parser.add_argument("--training-table", default=Path("data/training_table.csv"), type=Path)
     parser.add_argument("--output", default=Path("site/index.html"), type=Path)
     args = parser.parse_args()
 
@@ -484,7 +618,10 @@ def main() -> int:
     df = compute_predictions(df)
     print(df[["valid_time", "aod_om", "pm25_linear", "pm25_band", "pm25_max_linear", "pm25_max_band"]].to_string(index=False))
 
-    figure = build_figure(df)
+    training_sample = load_training_sample(args.training_table)
+    print(f"Loaded {len(training_sample)} historical samples for the regression-result panels")
+
+    figure = build_figure(df, training_sample)
     html = render_html(df, figure, datetime.now(timezone.utc))
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
