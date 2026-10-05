@@ -1,14 +1,25 @@
 #!/usr/bin/env python3
 """Build the 5-day PM2.5 forecast dashboard (static HTML) from CAMS AOD_om.
 
-Applies two models fit once (2026-10-03) on the full historical training
-table (data/training_table.csv, n=34,346) -- their coefficients are
-hardcoded below, so this script needs no training data and does no
-fitting at runtime:
+Applies four models fit once (2026-10-03/2026-10-05) on the full
+historical training table (data/training_table.csv, n=34,346) -- their
+coefficients are hardcoded below, so this script needs no training data
+to compute the forecast panels, and does no fitting at runtime:
 
-  Linear:   pm25_mean = 8.682231 + 35.967544 * aod_om   (R^2 = 0.467)
-  Ordinal:  pm25_mean band ~ aod_om, proportional-odds logit
-            (params = [aod_om coef, 3 threshold params], McFadden R^2 = 0.513)
+  Linear (pm25_mean):   pm25_mean = 8.682231 + 35.967544 * aod_om   (R^2 = 0.467)
+  Ordinal (pm25_mean):  pm25_mean band ~ aod_om, proportional-odds logit
+                         (params = [aod_om coef, 3 threshold params], McFadden R^2 = 0.513)
+  Linear (pm25_max):    pm25_max = 13.656895 + 42.929792 * aod_om   (R^2 = 0.410)
+  Ordinal (pm25_max):   pm25_max band ~ aod_om, proportional-odds logit
+                         (McFadden R^2 = 0.416)
+
+The dashboard still forecasts off pm25_mean (the top panels, unchanged);
+the pm25_max models are used only by the two "regression context" panels
+at the bottom, which plot the historical pm25_max~aod_om relationship
+(a sample of the training table, loaded at build time) with the current
+forecast's own (aod_om, predicted pm25_max) trajectory overlaid, so you
+can see where this forecast sits against the full historical scatter
+rather than just an extrapolated line.
 
 The ordinal params are the exact fitted statsmodels OrderedModel.params
 array; they are NOT raw cutpoints you can plug into a hand-written formula
@@ -48,6 +59,12 @@ from statsmodels.miscmodels.ordinal_model import OrderedModel
 LINEAR_INTERCEPT = 8.682231165899342
 LINEAR_SLOPE = 35.96754405996798
 ORDINAL_PARAMS = np.array([4.108760, 6.495276, 1.610290, 0.306059])
+
+# pm25_max ~ aod_om -- used only by the regression-context panels, not the
+# main time-series forecast (which stays on pm25_mean above).
+PM25MAX_LINEAR_INTERCEPT = 13.6568951089901
+PM25MAX_LINEAR_SLOPE = 42.92979153232956
+PM25MAX_ORDINAL_PARAMS = np.array([4.139879521805435, 5.608515888012341, 1.533790149659414, 0.5983033258719117])
 
 BAND_LABELS = ["Normal", "Elevated", "High", "Very High"]
 BAND_EDGES = [0, 55, 150, 250, float("inf")]
@@ -128,13 +145,13 @@ def load_forecast(path: Path) -> pd.DataFrame:
     return df.sort_values("valid_time").reset_index(drop=True)
 
 
-def predict_ordinal_probs(aod_om: pd.Series) -> pd.DataFrame:
+def predict_ordinal_probs(aod_om: pd.Series, params: np.ndarray = ORDINAL_PARAMS) -> pd.DataFrame:
     dummy_endog = pd.Series(
         pd.Categorical(BAND_LABELS, categories=BAND_LABELS, ordered=True), name="pm25_category"
     )
     dummy_exog = pd.DataFrame({"aod_om": [0.0, 1.0, 2.0, 3.0]})
     model = OrderedModel(dummy_endog, dummy_exog, distr="logit")
-    raw = model.predict(params=ORDINAL_PARAMS, exog=pd.DataFrame({"aod_om": aod_om}))
+    raw = model.predict(params=params, exog=pd.DataFrame({"aod_om": aod_om}))
     return pd.DataFrame(np.asarray(raw), columns=BAND_LABELS, index=aod_om.index)
 
 
@@ -144,7 +161,18 @@ def compute_predictions(df: pd.DataFrame) -> pd.DataFrame:
     probs = predict_ordinal_probs(df["aod_om"])
     df = pd.concat([df, probs], axis=1)
     df["pm25_band"] = probs.idxmax(axis=1)
+    # pm25_max linear estimate, used only by the regression-context panels.
+    df["pm25_max_linear"] = PM25MAX_LINEAR_INTERCEPT + PM25MAX_LINEAR_SLOPE * df["aod_om"]
     return df
+
+
+def load_training_sample(path: Path, n: int = 3000, seed: int = 42) -> pd.DataFrame:
+    """A random sample of (aod_om, pm25_max) from the full training table,
+    for the regression-context scatter -- plotting all 34,346 rows would
+    bloat the page and slow down rendering for no visible gain in density."""
+    full = pd.read_csv(path, usecols=["aod_om", "pm25_max"]).dropna()
+    sample = full.sample(n=min(n, len(full)), random_state=seed)
+    return sample.reset_index(drop=True)
 
 
 def _hex_to_rgba(hex_color: str, alpha: float) -> str:
@@ -153,30 +181,42 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
     return f"rgba({r},{g},{b},{alpha})"
 
 
-def _row_domains(weights: list[float], gap: float = 0.045) -> list[tuple[float, float]]:
+def _row_domains(weights: list[float], gap: float | list[float] = 0.045) -> list[tuple[float, float]]:
     """Top-to-bottom y-domains for stacked subplots, like a matplotlib
-    gridspec height_ratios layout."""
-    total = sum(weights)
+    gridspec height_ratios layout. `gap` is either one fraction reused
+    between every pair of rows, or a list of len(weights)-1 fractions for
+    when one boundary (e.g. between two unrelated axis groups, each with
+    its own tick labels/title crowding that gap) needs more room than the
+    rest."""
     n = len(weights)
-    avail = 1 - gap * (n - 1)
+    gaps = [gap] * (n - 1) if isinstance(gap, (int, float)) else list(gap)
+    avail = 1 - sum(gaps)
+    total = sum(weights)
     domains = []
     y_top = 1.0
-    for w in weights:
+    for i, w in enumerate(weights):
         h = avail * w / total
         y_bottom = y_top - h
         domains.append((round(y_bottom, 6), round(y_top, 6)))
-        y_top = y_bottom - gap
+        y_top = y_bottom - (gaps[i] if i < len(gaps) else 0)
     return domains
 
 
-def build_figure(df: pd.DataFrame) -> dict:
-    """Plotly.js figure spec (data + layout) for the 6-panel dashboard:
-    AOD, linear PM2.5 estimate, and one small-multiple per band probability.
-    All panels share a synced, zoomable/pannable x-axis; every y-axis is
-    pinned to start at 0 (rangemode='tozero')."""
+def build_figure(df: pd.DataFrame, training_sample: pd.DataFrame) -> dict:
+    """Plotly.js figure spec (data + layout) for the 8-panel dashboard:
+    AOD, linear PM2.5 estimate, one small-multiple per band probability
+    (all 6 sharing a synced, zoomable/pannable time x-axis), plus two
+    regression-context panels (historical pm25_max~aod_om scatter + fit,
+    and the ordinal logistic band-probability curves vs aod_om) sharing
+    their own synced, independent aod_om x-axis. Every y-axis is pinned
+    to start at 0 (rangemode='tozero')."""
     times = [t.isoformat() for t in df["valid_time"]]
-    domains = _row_domains([3, 3, 1, 1, 1, 1])
-    axis_ids = ["", "2", "3", "4", "5", "6"]  # Plotly: '', '2', '3', ... for x/y/xaxis/yaxis keys
+    # Extra-wide gap between panel 6 (end of the time-axis group, which
+    # carries its own rotated date tick labels + x-axis title) and panel 7
+    # (start of the aod_om-axis group, which has its own title) -- the
+    # standard gap is too tight for both of those to fit without colliding.
+    domains = _row_domains([3, 3, 1, 1, 1, 1, 3, 3], gap=[0.045] * 5 + [0.09] + [0.045])
+    axis_ids = ["", "2", "3", "4", "5", "6", "7", "8"]  # Plotly: '', '2', '3', ... for x/y/xaxis/yaxis keys
 
     base_axis = {
         "type": "date",
@@ -192,7 +232,7 @@ def build_figure(df: pd.DataFrame) -> dict:
         "paper_bgcolor": SURFACE,
         "plot_bgcolor": SURFACE,
         "font": {"color": INK, "family": "system-ui, -apple-system, Segoe UI, sans-serif"},
-        "margin": {"l": 60, "r": 20, "t": 50, "b": 60},
+        "margin": {"l": 60, "r": 20, "t": 70, "b": 60},
         "showlegend": False,
         "dragmode": "zoom",
         "hovermode": "closest",
@@ -287,6 +327,106 @@ def build_figure(df: pd.DataFrame) -> dict:
                 "font": {"size": 13, "color": INK},
             })
 
+    # Combined aod_om range for the two regression-context panels below:
+    # the fit line / probability curves are drawn across the full
+    # historical range, with the live forecast's own aod_om values (which
+    # can exceed historical levels, since it's a regional max -- see
+    # module docstring) extending it if needed.
+    x_max = max(float(training_sample["aod_om"].max()), float(df["aod_om"].max())) * 1.05
+    x_grid = np.linspace(0, x_max, 200)
+    grid_probs = predict_ordinal_probs(pd.Series(x_grid), PM25MAX_ORDINAL_PARAMS)
+
+    aod_axis = {
+        "gridcolor": GRIDLINE, "linecolor": GRIDLINE, "tickfont": {"size": 10, "color": MUTED},
+        "showline": True, "zeroline": False, "range": [0, x_max],
+    }
+
+    # Panel 7: historical pm25_max ~ aod_om scatter + OLS fit line, with the
+    # live forecast's own (aod_om, predicted pm25_max) trajectory overlaid.
+    aid = axis_ids[6]
+    y0, y1 = domains[6]
+    layout[f"xaxis{aid}"] = {**aod_axis, "domain": [0, 1], "anchor": f"y{aid}", "showticklabels": False}
+    layout[f"yaxis{aid}"] = {
+        "domain": [y0, y1], "anchor": f"x{aid}", "rangemode": "tozero",
+        "title": {"text": "PM2.5 max (µg/m³)", "font": {"size": 11, "color": INK}},
+        "gridcolor": GRIDLINE, "tickfont": {"size": 10, "color": MUTED},
+    }
+    data.append({
+        "type": "scatter", "mode": "markers", "name": "Historical",
+        "x": training_sample["aod_om"].round(4).tolist(), "y": training_sample["pm25_max"].round(2).tolist(),
+        "marker": {"size": 4, "color": _hex_to_rgba(MUTED, 0.3)},
+        "xaxis": f"x{aid}", "yaxis": f"y{aid}",
+        "hovertemplate": "Historical<br>AOD_om: %{x:.3f}<br>PM2.5 max: %{y:.1f} µg/m³<extra></extra>",
+    })
+    data.append({
+        "type": "scatter", "mode": "lines", "name": "Fit",
+        "x": x_grid.round(4).tolist(), "y": (PM25MAX_LINEAR_INTERCEPT + PM25MAX_LINEAR_SLOPE * x_grid).round(2).tolist(),
+        "line": {"color": INK, "width": 2, "dash": "dot"},
+        "xaxis": f"x{aid}", "yaxis": f"y{aid}", "hoverinfo": "skip",
+    })
+    data.append({
+        "type": "scatter", "mode": "lines+markers", "name": "This forecast",
+        "x": df["aod_om"].round(4).tolist(), "y": df["pm25_max_linear"].round(2).tolist(),
+        "line": {"color": AOD_COLOR, "width": 2}, "marker": {"size": 5, "color": AOD_COLOR},
+        "customdata": times, "xaxis": f"x{aid}", "yaxis": f"y{aid}",
+        "hovertemplate": f"%{{customdata|{DATE_TICKFORMAT}}}<br>AOD_om: %{{x:.3f}}<br>PM2.5 max (forecast): %{{y:.1f}} µg/m³<extra></extra>",
+    })
+    layout["annotations"].append({
+        "text": "Linear regression in context: historical PM2.5 max vs AOD_om, this forecast overlaid",
+        "xref": "paper", "yref": "paper", "x": 0, "y": y1 + 0.028,
+        "xanchor": "left", "yanchor": "bottom", "showarrow": False,
+        "font": {"size": 13, "color": INK},
+    })
+
+    # Panel 8: ordinal logistic band-probability curves vs aod_om, with the
+    # live forecast's aod_om values marked as a rug along the bottom.
+    aid = axis_ids[7]
+    y0, y1 = domains[7]
+    layout[f"xaxis{aid}"] = {
+        **aod_axis, "domain": [0, 1], "anchor": f"y{aid}", "matches": f"x{axis_ids[6]}",
+        "title": {"text": "Organic matter AOD", "font": {"size": 11, "color": INK}},
+    }
+    layout[f"yaxis{aid}"] = {
+        "domain": [y0, y1], "anchor": f"x{aid}", "range": [0, 1],
+        "title": {"text": "Predicted probability", "font": {"size": 10, "color": INK}},
+        "gridcolor": GRIDLINE, "tickfont": {"size": 9, "color": MUTED},
+    }
+    for label in BAND_LABELS:
+        data.append({
+            "type": "scatter", "mode": "lines", "name": label,
+            "x": x_grid.round(4).tolist(), "y": grid_probs[label].round(4).tolist(),
+            "line": {"color": BAND_COLORS[label], "width": 2},
+            "xaxis": f"x{aid}", "yaxis": f"y{aid}",
+            "hovertemplate": f"AOD_om: %{{x:.3f}}<br>{label}: %{{y:.1%}}<extra></extra>",
+        })
+    data.append({
+        "type": "scatter", "mode": "markers", "name": "This forecast",
+        "x": df["aod_om"].round(4).tolist(), "y": [0.015] * len(df),
+        "marker": {"symbol": "triangle-up", "size": 7, "color": AOD_COLOR},
+        "customdata": times, "xaxis": f"x{aid}", "yaxis": f"y{aid}",
+        "hovertemplate": f"%{{customdata|{DATE_TICKFORMAT}}}<br>AOD_om: %{{x:.3f}}<extra>This forecast</extra>",
+    })
+    # Label each curve at its own peak (not all at the right edge, where
+    # Elevated/High/Very High can converge to similar low values and
+    # collide) -- Very High is monotonically increasing so its peak is
+    # naturally the right edge anyway.
+    for label in BAND_LABELS:
+        curve = grid_probs[label]
+        peak_i = int(curve.values.argmax())
+        is_left_edge = peak_i == 0
+        layout["annotations"].append({
+            "text": label, "xref": f"x{aid}", "yref": f"y{aid}",
+            "x": float(x_grid[peak_i]), "y": float(curve.iloc[peak_i]),
+            "xanchor": "left" if is_left_edge else "center", "yanchor": "bottom", "showarrow": False,
+            "font": {"size": 10, "color": BAND_COLORS[label]},
+        })
+    layout["annotations"].append({
+        "text": "Ordinal logistic in context: band probability vs AOD_om (▲ = this forecast's AOD_om values)",
+        "xref": "paper", "yref": "paper", "x": 0, "y": y1 + 0.028,
+        "xanchor": "left", "yanchor": "bottom", "showarrow": False,
+        "font": {"size": 13, "color": INK},
+    })
+
     return {"data": data, "layout": layout}
 
 
@@ -309,7 +449,7 @@ def render_html(df: pd.DataFrame, figure: dict, generated_at: datetime) -> str:
   h1 {{ font-size: 1.4rem; margin-bottom: 4px; }}
   .meta {{ color: {MUTED}; font-size: 0.9rem; margin-bottom: 24px; }}
   .hint {{ color: {MUTED}; font-size: 0.8rem; margin-bottom: 12px; }}
-  #chart {{ width: 100%; height: 980px; border-radius: 8px; border: 1px solid {GRIDLINE}; background: {SURFACE}; }}
+  #chart {{ width: 100%; height: 1560px; border-radius: 8px; border: 1px solid {GRIDLINE}; background: {SURFACE}; }}
   footer {{ color: {MUTED}; font-size: 0.8rem; margin-top: 24px; }}
   a {{ color: {AOD_COLOR}; }}
 </style>
@@ -331,7 +471,8 @@ def render_html(df: pd.DataFrame, figure: dict, generated_at: datetime) -> str:
   <footer>
     Models fit once on 34,346 historical observations (2014-03-31 to 2025-12-31) from EAC4/ERA5
     reanalysis and NEA PM2.5 station data; coefficients are hardcoded, not refit per run.
-    Linear: R&sup2;=0.467. Ordinal logistic: McFadden pseudo-R&sup2;=0.513.
+    pm25_mean ~ aod_om -- linear: R&sup2;=0.467, ordinal logistic: McFadden pseudo-R&sup2;=0.513.
+    pm25_max ~ aod_om -- linear: R&sup2;=0.410, ordinal logistic: McFadden pseudo-R&sup2;=0.416.
     Source data and code: <a href="https://github.com/zgkn/AOD_PM">github.com/zgkn/AOD_PM</a>.
   </footer>
 </body>
@@ -343,6 +484,7 @@ def render_html(df: pd.DataFrame, figure: dict, generated_at: datetime) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--forecast-nc", default=Path("output/cams_forecast_aod_om.nc"), type=Path)
+    parser.add_argument("--training-table", default=Path("data/training_table.csv"), type=Path)
     parser.add_argument("--output", default=Path("site/index.html"), type=Path)
     args = parser.parse_args()
 
@@ -352,7 +494,10 @@ def main() -> int:
     df = compute_predictions(df)
     print(df[["valid_time", "aod_om", "pm25_linear", "pm25_band"]].to_string(index=False))
 
-    figure = build_figure(df)
+    training_sample = load_training_sample(args.training_table)
+    print(f"Loaded {len(training_sample)}-row sample from {args.training_table} for regression-context panels")
+
+    figure = build_figure(df, training_sample)
     html = render_html(df, figure, datetime.now(timezone.utc))
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
