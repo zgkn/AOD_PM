@@ -13,11 +13,13 @@ and does no fitting at runtime:
   Ordinal (pm25_max):   pm25_max band ~ aod_om, proportional-odds logit
                          (McFadden R^2 = 0.416)
 
-The dashboard forecasts BOTH targets over the same 5-day horizon, each
-with its own linear-estimate panel and its own 4 per-band probability
-panels -- the pm25_max track is laid out exactly like the existing
-pm25_mean track, just lower on the page, sharing the same synced,
-zoomable time x-axis as everything else.
+The dashboard forecasts BOTH targets over the same 5-day horizon,
+overlaid in the same panels rather than as separate tracks: pm25_mean
+as a solid line, pm25_max as a dashed line of the same color, in both
+the linear-estimate panel and each of the 4 per-band probability
+panels -- since max >= mean always, this reads as "typical value, with
+a dashed ceiling for how bad it could get" at a glance, which is the
+whole point of forecasting both.
 
 The ordinal params are the exact fitted statsmodels OrderedModel.params
 array; they are NOT raw cutpoints you can plug into a hand-written formula
@@ -200,21 +202,27 @@ def _row_domains(weights: list[float], gap: float = 0.03) -> list[tuple[float, f
 
 
 def _linear_panel(
-    data: list, layout: dict, aid: str, domain: tuple, times: list, values: pd.Series,
-    y_title: str, panel_title: str,
+    data: list, layout: dict, aid: str, domain: tuple, times: list,
+    mean_values: pd.Series, max_values: pd.Series, panel_title: str,
 ) -> None:
     y0, y1 = domain
     layout[f"xaxis{aid}"] = {**BASE_X_AXIS, "matches": "x", "domain": [0, 1], "anchor": f"y{aid}", "showticklabels": False}
     layout[f"yaxis{aid}"] = {
         "domain": [y0, y1], "anchor": f"x{aid}", "rangemode": "tozero",
-        "title": {"text": y_title, "font": {"size": 11, "color": INK}},
+        "title": {"text": "Predicted PM2.5 (µg/m³)", "font": {"size": 11, "color": INK}},
         "gridcolor": GRIDLINE, "tickfont": {"size": 10, "color": MUTED},
     }
     data.append({
-        "type": "scatter", "mode": "lines+markers", "x": times, "y": values.round(2).tolist(),
+        "type": "scatter", "mode": "lines+markers", "x": times, "y": mean_values.round(2).tolist(),
         "line": {"color": INK, "width": 2}, "marker": {"size": 4, "color": INK},
         "xaxis": f"x{aid}", "yaxis": f"y{aid}",
-        "hovertemplate": f"%{{x|{DATE_TICKFORMAT}}}<br>{y_title}: %{{y:.1f}}<extra></extra>",
+        "hovertemplate": f"%{{x|{DATE_TICKFORMAT}}}<br>PM2.5 mean: %{{y:.1f}} µg/m³<extra></extra>",
+    })
+    data.append({
+        "type": "scatter", "mode": "lines", "x": times, "y": max_values.round(2).tolist(),
+        "line": {"color": INK, "width": 1.5, "dash": "dash"},
+        "xaxis": f"x{aid}", "yaxis": f"y{aid}",
+        "hovertemplate": f"%{{x|{DATE_TICKFORMAT}}}<br>PM2.5 max: %{{y:.1f}} µg/m³<extra></extra>",
     })
     for edge, label in zip(BAND_EDGES[1:-1], BAND_LABELS[1:]):
         layout["shapes"].append({
@@ -222,6 +230,16 @@ def _linear_panel(
             "x0": 0, "x1": 1, "y0": edge, "y1": edge,
             "line": {"color": BAND_COLORS[label], "width": 1, "dash": "dash"}, "opacity": 0.6,
         })
+    layout["annotations"].append({
+        "text": "— PM2.5 mean", "xref": f"x{aid} domain", "yref": f"y{aid} domain",
+        "x": 0.01, "y": 0.97, "xanchor": "left", "yanchor": "top", "showarrow": False,
+        "font": {"size": 10, "color": INK, "family": "system-ui, sans-serif"},
+    })
+    layout["annotations"].append({
+        "text": "- - PM2.5 max", "xref": f"x{aid} domain", "yref": f"y{aid} domain",
+        "x": 0.01, "y": 0.88, "xanchor": "left", "yanchor": "top", "showarrow": False,
+        "font": {"size": 10, "color": INK, "family": "system-ui, sans-serif"},
+    })
     layout["annotations"].append({
         "text": panel_title, "xref": "paper", "yref": "paper", "x": 0, "y": y1 + 0.022,
         "xanchor": "left", "yanchor": "bottom", "showarrow": False,
@@ -231,13 +249,13 @@ def _linear_panel(
 
 def _band_panels(
     data: list, layout: dict, axis_ids: list, domains: list, times: list, df: pd.DataFrame,
-    band_cols: dict, group_title: str, is_final_group: bool,
+    group_title: str,
 ) -> None:
     for i, label in enumerate(BAND_LABELS):
         aid = axis_ids[i]
         y0, y1 = domains[i]
         color = BAND_COLORS[label]
-        is_last_panel = is_final_group and i == len(BAND_LABELS) - 1
+        is_last_panel = i == len(BAND_LABELS) - 1
         layout[f"xaxis{aid}"] = {
             **BASE_X_AXIS, "matches": "x", "domain": [0, 1], "anchor": f"y{aid}", "showticklabels": is_last_panel,
             **({"title": {"text": "Forecast valid time (UTC)", "font": {"size": 11, "color": INK}}} if is_last_panel else {}),
@@ -247,11 +265,20 @@ def _band_panels(
             "title": {"text": "Prob.", "font": {"size": 9, "color": INK}},
             "gridcolor": GRIDLINE, "tickfont": {"size": 9, "color": MUTED},
         }
+        # Mean: solid line, filled. Max: dashed line, no fill (filling both
+        # would muddy the overlap) -- same color per band, same convention
+        # as the linear panel above.
         data.append({
-            "type": "scatter", "mode": "lines", "x": times, "y": df[band_cols[label]].round(4).tolist(),
-            "line": {"color": color, "width": 1.5}, "fill": "tozeroy", "fillcolor": _hex_to_rgba(color, 0.35),
+            "type": "scatter", "mode": "lines", "x": times, "y": df[label].round(4).tolist(),
+            "line": {"color": color, "width": 1.5}, "fill": "tozeroy", "fillcolor": _hex_to_rgba(color, 0.3),
             "xaxis": f"x{aid}", "yaxis": f"y{aid}",
-            "hovertemplate": f"%{{x|{DATE_TICKFORMAT}}}<br>{label}: %{{y:.1%}}<extra></extra>",
+            "hovertemplate": f"%{{x|{DATE_TICKFORMAT}}}<br>{label} (mean): %{{y:.1%}}<extra></extra>",
+        })
+        data.append({
+            "type": "scatter", "mode": "lines", "x": times, "y": df[f"max_{label}"].round(4).tolist(),
+            "line": {"color": color, "width": 1.5, "dash": "dash"},
+            "xaxis": f"x{aid}", "yaxis": f"y{aid}",
+            "hovertemplate": f"%{{x|{DATE_TICKFORMAT}}}<br>{label} (max): %{{y:.1%}}<extra></extra>",
         })
         layout["annotations"].append({
             "text": label, "xref": f"x{aid} domain", "yref": f"y{aid} domain",
@@ -267,13 +294,14 @@ def _band_panels(
 
 
 def build_figure(df: pd.DataFrame) -> dict:
-    """Plotly.js figure spec (data + layout) for the 11-panel dashboard:
-    AOD, then two parallel forecast tracks (pm25_mean, pm25_max), each a
-    linear-estimate panel plus 4 per-band probability small multiples.
-    Every panel shares one synced, zoomable/pannable time x-axis, and
-    every y-axis is pinned to start at 0 (rangemode='tozero')."""
+    """Plotly.js figure spec (data + layout) for the 6-panel dashboard:
+    AOD, a linear-estimate panel, and 4 per-band probability panels --
+    each of the latter 5 overlays pm25_mean (solid) and pm25_max (dashed)
+    in the same panel rather than as separate tracks. Every panel shares
+    one synced, zoomable/pannable time x-axis, and every y-axis is
+    pinned to start at 0 (rangemode='tozero')."""
     times = [t.isoformat() for t in df["valid_time"]]
-    weights = [3, 3, 1, 1, 1, 1, 3, 1, 1, 1, 1]
+    weights = [3, 3, 1, 1, 1, 1]
     domains = _row_domains(weights)
     axis_ids = [""] + [str(i) for i in range(2, len(weights) + 1)]
 
@@ -315,34 +343,16 @@ def build_figure(df: pd.DataFrame) -> dict:
         "font": {"size": 13, "color": INK},
     })
 
-    # Panel 2: PM2.5 mean, linear regression estimate
+    # Panel 2: linear regression estimate, PM2.5 mean (solid) + max (dashed)
     _linear_panel(
-        data, layout, axis_ids[1], domains[1], times, df["pm25_linear"],
-        "Predicted PM2.5 mean (µg/m³)",
-        "Linear regression estimate -- PM2.5 mean (dashed lines = haze.gov.sg band boundaries)",
+        data, layout, axis_ids[1], domains[1], times, df["pm25_linear"], df["pm25_max_linear"],
+        "Linear regression estimate (dashed lines = haze.gov.sg band boundaries)",
     )
 
-    # Panels 3-6: PM2.5 mean, per-band probability small multiples
+    # Panels 3-6: per-band probability, PM2.5 mean (solid/filled) + max (dashed)
     _band_panels(
         data, layout, axis_ids[2:6], domains[2:6], times, df,
-        band_cols={label: label for label in BAND_LABELS},
-        group_title="Ordinal logistic regression -- PM2.5 mean: predicted band probability (per-band detail)",
-        is_final_group=False,
-    )
-
-    # Panel 7: PM2.5 max, linear regression estimate
-    _linear_panel(
-        data, layout, axis_ids[6], domains[6], times, df["pm25_max_linear"],
-        "Predicted PM2.5 max (µg/m³)",
-        "Linear regression estimate -- PM2.5 max (dashed lines = haze.gov.sg band boundaries)",
-    )
-
-    # Panels 8-11: PM2.5 max, per-band probability small multiples
-    _band_panels(
-        data, layout, axis_ids[7:11], domains[7:11], times, df,
-        band_cols={label: f"max_{label}" for label in BAND_LABELS},
-        group_title="Ordinal logistic regression -- PM2.5 max: predicted band probability (per-band detail)",
-        is_final_group=True,
+        group_title="Ordinal logistic regression: predicted PM2.5 band probability (per-band detail)",
     )
 
     return {"data": data, "layout": layout}
@@ -367,7 +377,7 @@ def render_html(df: pd.DataFrame, figure: dict, generated_at: datetime) -> str:
   h1 {{ font-size: 1.4rem; margin-bottom: 4px; }}
   .meta {{ color: {MUTED}; font-size: 0.9rem; margin-bottom: 24px; }}
   .hint {{ color: {MUTED}; font-size: 0.8rem; margin-bottom: 12px; }}
-  #chart {{ width: 100%; height: 1900px; border-radius: 8px; border: 1px solid {GRIDLINE}; background: {SURFACE}; }}
+  #chart {{ width: 100%; height: 1050px; border-radius: 8px; border: 1px solid {GRIDLINE}; background: {SURFACE}; }}
   footer {{ color: {MUTED}; font-size: 0.8rem; margin-top: 24px; }}
   a {{ color: {AOD_COLOR}; }}
 </style>
