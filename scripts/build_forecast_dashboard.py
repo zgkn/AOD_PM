@@ -58,11 +58,15 @@ from statsmodels.miscmodels.ordinal_model import OrderedModel
 # --- Hardcoded, fit once on the full training table (see module docstring) ---
 LINEAR_INTERCEPT = 8.682231165899342
 LINEAR_SLOPE = 35.96754405996798
+LINEAR_R2 = 0.467
 ORDINAL_PARAMS = np.array([4.108760, 6.495276, 1.610290, 0.306059])
+ORDINAL_MCFADDEN_R2 = 0.513
 
 PM25MAX_LINEAR_INTERCEPT = 13.6568951089901
 PM25MAX_LINEAR_SLOPE = 42.92979153232956
+PM25MAX_LINEAR_R2 = 0.410
 PM25MAX_ORDINAL_PARAMS = np.array([4.139879521805435, 5.608515888012341, 1.533790149659414, 0.5983033258719117])
+PM25MAX_ORDINAL_MCFADDEN_R2 = 0.416
 
 BAND_LABELS = ["Normal", "Elevated", "High", "Very High"]
 BAND_EDGES = [0, 55, 150, 250, float("inf")]
@@ -358,12 +362,63 @@ def build_figure(df: pd.DataFrame) -> dict:
     return {"data": data, "layout": layout}
 
 
+def render_model_details() -> str:
+    """A table of the actual fitted equations/parameters behind the chart,
+    not just a one-line R^2 summary -- the ordinal rows report statsmodels'
+    raw OrderedModel.params (aod_om coefficient + 3 threshold params), not
+    literal PM2.5 cutpoints; see module docstring for why those can't be
+    hand-derived into a formula the way the linear row's can."""
+    rows = [
+        (
+            "PM2.5 mean", "Linear (OLS)",
+            f"pm25_mean = {LINEAR_INTERCEPT:.4f} + {LINEAR_SLOPE:.4f} &times; aod_om",
+            f"R&sup2; = {LINEAR_R2:.3f}",
+        ),
+        (
+            "PM2.5 mean", "Ordinal logistic",
+            "aod_om coef = {:.4f}; thresholds = {:.4f}, {:.4f}, {:.4f}".format(*ORDINAL_PARAMS),
+            f"McFadden pseudo-R&sup2; = {ORDINAL_MCFADDEN_R2:.3f}",
+        ),
+        (
+            "PM2.5 max", "Linear (OLS)",
+            f"pm25_max = {PM25MAX_LINEAR_INTERCEPT:.4f} + {PM25MAX_LINEAR_SLOPE:.4f} &times; aod_om",
+            f"R&sup2; = {PM25MAX_LINEAR_R2:.3f}",
+        ),
+        (
+            "PM2.5 max", "Ordinal logistic",
+            "aod_om coef = {:.4f}; thresholds = {:.4f}, {:.4f}, {:.4f}".format(*PM25MAX_ORDINAL_PARAMS),
+            f"McFadden pseudo-R&sup2; = {PM25MAX_ORDINAL_MCFADDEN_R2:.3f}",
+        ),
+    ]
+    body_rows = "\n".join(
+        f"    <tr><td>{target}</td><td>{model}</td><td><code>{form}</code></td><td>{fit}</td></tr>"
+        for target, model, form, fit in rows
+    )
+    return f"""  <h2>Regression model details</h2>
+  <table class="models">
+    <thead><tr><th>Target</th><th>Model</th><th>Fitted form</th><th>Fit quality</th></tr></thead>
+    <tbody>
+{body_rows}
+    </tbody>
+  </table>
+  <p class="note">
+    Both targets regressed on aod_om alone. The ordinal logistic rows are statsmodels'
+    raw <code>OrderedModel.params</code> (an aod_om coefficient plus 3 internal threshold
+    parameters) -- not literal PM2.5 cutpoints, and not safe to hand-derive a formula from;
+    the dashboard's predictions call the fitted model's own <code>.predict()</code> instead.
+    All four models were fit once (2026-10-03/2026-10-05) on the full historical training
+    table (n=34,346, 2014-03-31 to 2025-12-31) and are hardcoded here, not refit per run.
+  </p>
+"""
+
+
 def render_html(df: pd.DataFrame, figure: dict, generated_at: datetime) -> str:
     figure_json = json.dumps(figure)
     config_json = json.dumps({
         "responsive": True, "scrollZoom": True, "displaylogo": False,
         "modeBarButtonsToRemove": ["lasso2d", "select2d"],
     })
+    model_details = render_model_details()
     html = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -375,9 +430,18 @@ def render_html(df: pd.DataFrame, figure: dict, generated_at: datetime) -> str:
   body {{ font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: {SURFACE}; color: {INK};
           max-width: 1000px; margin: 0 auto; padding: 24px 16px 48px; }}
   h1 {{ font-size: 1.4rem; margin-bottom: 4px; }}
+  h2 {{ font-size: 1.1rem; margin: 32px 0 12px; }}
   .meta {{ color: {MUTED}; font-size: 0.9rem; margin-bottom: 24px; }}
   .hint {{ color: {MUTED}; font-size: 0.8rem; margin-bottom: 12px; }}
   #chart {{ width: 100%; height: 1050px; border-radius: 8px; border: 1px solid {GRIDLINE}; background: {SURFACE}; }}
+  table.models {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; background: #fff;
+                  border: 1px solid {GRIDLINE}; border-radius: 8px; overflow: hidden; }}
+  table.models th, table.models td {{ text-align: left; padding: 10px 12px; border-bottom: 1px solid {GRIDLINE}; }}
+  table.models th {{ color: {MUTED}; font-weight: 600; text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.03em; }}
+  table.models tr:last-child td {{ border-bottom: none; }}
+  table.models code {{ font-size: 0.82rem; }}
+  p.note {{ color: {MUTED}; font-size: 0.8rem; margin-top: 10px; }}
+  code {{ background: {SURFACE}; border: 1px solid {GRIDLINE}; border-radius: 4px; padding: 1px 5px; }}
   footer {{ color: {MUTED}; font-size: 0.8rem; margin-top: 24px; }}
   a {{ color: {AOD_COLOR}; }}
 </style>
@@ -396,11 +460,10 @@ def render_html(df: pd.DataFrame, figure: dict, generated_at: datetime) -> str:
     Plotly.newPlot("chart", FORECAST_FIGURE.data, FORECAST_FIGURE.layout, {config_json});
   </script>
 
+{model_details}
   <footer>
     Models fit once on 34,346 historical observations (2014-03-31 to 2025-12-31) from EAC4/ERA5
     reanalysis and NEA PM2.5 station data; coefficients are hardcoded, not refit per run.
-    pm25_mean ~ aod_om -- linear: R&sup2;=0.467, ordinal logistic: McFadden pseudo-R&sup2;=0.513.
-    pm25_max ~ aod_om -- linear: R&sup2;=0.410, ordinal logistic: McFadden pseudo-R&sup2;=0.416.
     Source data and code: <a href="https://github.com/zgkn/AOD_PM">github.com/zgkn/AOD_PM</a>.
   </footer>
 </body>
