@@ -350,12 +350,14 @@ def _regression_scatter_panel(
     data.append({
         "type": "scatter", "mode": "lines", "x": x_grid.round(4).tolist(),
         "y": (LINEAR_INTERCEPT + LINEAR_SLOPE * x_grid).round(2).tolist(),
-        "line": {"color": PM25_MEAN_COLOR, "width": 2.5}, "xaxis": f"x{aid}", "yaxis": f"y{aid}", "hoverinfo": "skip",
+        "line": {"color": PM25_MEAN_COLOR, "width": 2.5}, "xaxis": f"x{aid}", "yaxis": f"y{aid}",
+        "hovertemplate": "Linear fit<br>AOD_om: %{x:.3f}<br>PM2.5 mean: %{y:.1f} µg/m³<extra></extra>",
     })
     data.append({
         "type": "scatter", "mode": "lines", "x": x_grid.round(4).tolist(),
         "y": (PM25MAX_LINEAR_INTERCEPT + PM25MAX_LINEAR_SLOPE * x_grid).round(2).tolist(),
-        "line": {"color": PM25_MAX_COLOR, "width": 2.5}, "xaxis": f"x{aid}", "yaxis": f"y{aid}", "hoverinfo": "skip",
+        "line": {"color": PM25_MAX_COLOR, "width": 2.5}, "xaxis": f"x{aid}", "yaxis": f"y{aid}",
+        "hovertemplate": "Linear fit<br>AOD_om: %{x:.3f}<br>PM2.5 max: %{y:.1f} µg/m³<extra></extra>",
     })
     layout["annotations"].append({
         "text": "— PM2.5 mean fit", "xref": f"x{aid} domain", "yref": f"y{aid} domain",
