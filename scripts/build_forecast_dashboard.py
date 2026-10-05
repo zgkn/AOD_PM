@@ -85,6 +85,12 @@ GRIDLINE = "#e1e0d9"
 MUTED = "#898781"
 INK = "#0b0b0b"
 
+# Historical linear-regression panel only: PM2.5 mean vs max get distinct
+# colors (not just solid/dashed), since that panel overlays two full scatter
+# clouds where line style alone is hard to trace back to a cloud of points.
+PM25_MEAN_COLOR = "#2a78d6"
+PM25_MAX_COLOR = "#d03b3b"
+
 AOD_VAR_CANDIDATES = ("omaod550", "organic_matter_aerosol_optical_depth_550nm")
 
 DATE_TICKFORMAT = "%Y-%m-%d %H:%M"  # ISO-style; applies to axis ticks and hover
@@ -317,7 +323,9 @@ def _regression_scatter_panel(
     training_sample: pd.DataFrame, x_grid: np.ndarray,
 ) -> None:
     """Historical pm25 ~ aod_om scatter (both targets) + both fit lines,
-    same solid=mean/dashed=max convention as the forecast panels above."""
+    colored by target (blue = mean, red = max) rather than the solid/dashed
+    convention used elsewhere -- with two full scatter clouds overlaid here,
+    line style alone doesn't carry back to which cloud a point belongs to."""
     y0, y1 = domain
     layout[f"xaxis{aid}"] = {**aod_axis, "domain": [0, 1], "anchor": f"y{aid}", "showticklabels": False}
     layout[f"yaxis{aid}"] = {
@@ -328,36 +336,36 @@ def _regression_scatter_panel(
     data.append({
         "type": "scatter", "mode": "markers", "x": training_sample["aod_om"].round(4).tolist(),
         "y": training_sample["pm25_mean"].round(2).tolist(),
-        "marker": {"size": 4, "color": _hex_to_rgba(MUTED, 0.25)},
+        "marker": {"size": 4, "color": _hex_to_rgba(PM25_MEAN_COLOR, 0.35)},
         "xaxis": f"x{aid}", "yaxis": f"y{aid}",
         "hovertemplate": "Historical<br>AOD_om: %{x:.3f}<br>PM2.5 mean: %{y:.1f} µg/m³<extra></extra>",
     })
     data.append({
         "type": "scatter", "mode": "markers", "x": training_sample["aod_om"].round(4).tolist(),
         "y": training_sample["pm25_max"].round(2).tolist(),
-        "marker": {"size": 4, "color": _hex_to_rgba(MUTED, 0.45)},
+        "marker": {"size": 4, "color": _hex_to_rgba(PM25_MAX_COLOR, 0.35)},
         "xaxis": f"x{aid}", "yaxis": f"y{aid}",
         "hovertemplate": "Historical<br>AOD_om: %{x:.3f}<br>PM2.5 max: %{y:.1f} µg/m³<extra></extra>",
     })
     data.append({
         "type": "scatter", "mode": "lines", "x": x_grid.round(4).tolist(),
         "y": (LINEAR_INTERCEPT + LINEAR_SLOPE * x_grid).round(2).tolist(),
-        "line": {"color": INK, "width": 2}, "xaxis": f"x{aid}", "yaxis": f"y{aid}", "hoverinfo": "skip",
+        "line": {"color": PM25_MEAN_COLOR, "width": 2.5}, "xaxis": f"x{aid}", "yaxis": f"y{aid}", "hoverinfo": "skip",
     })
     data.append({
         "type": "scatter", "mode": "lines", "x": x_grid.round(4).tolist(),
         "y": (PM25MAX_LINEAR_INTERCEPT + PM25MAX_LINEAR_SLOPE * x_grid).round(2).tolist(),
-        "line": {"color": INK, "width": 2, "dash": "dash"}, "xaxis": f"x{aid}", "yaxis": f"y{aid}", "hoverinfo": "skip",
+        "line": {"color": PM25_MAX_COLOR, "width": 2.5}, "xaxis": f"x{aid}", "yaxis": f"y{aid}", "hoverinfo": "skip",
     })
     layout["annotations"].append({
         "text": "— PM2.5 mean fit", "xref": f"x{aid} domain", "yref": f"y{aid} domain",
         "x": 0.01, "y": 0.97, "xanchor": "left", "yanchor": "top", "showarrow": False,
-        "font": {"size": 10, "color": INK, "family": "system-ui, sans-serif"},
+        "font": {"size": 10, "color": PM25_MEAN_COLOR, "family": "system-ui, sans-serif"},
     })
     layout["annotations"].append({
-        "text": "- - PM2.5 max fit", "xref": f"x{aid} domain", "yref": f"y{aid} domain",
+        "text": "— PM2.5 max fit", "xref": f"x{aid} domain", "yref": f"y{aid} domain",
         "x": 0.01, "y": 0.88, "xanchor": "left", "yanchor": "top", "showarrow": False,
-        "font": {"size": 10, "color": INK, "family": "system-ui, sans-serif"},
+        "font": {"size": 10, "color": PM25_MAX_COLOR, "family": "system-ui, sans-serif"},
     })
     layout["annotations"].append({
         "text": "Linear regression: historical PM2.5 vs AOD_om (points) with the fitted line",
@@ -412,9 +420,11 @@ def build_figure(df: pd.DataFrame, training_sample: pd.DataFrame) -> dict:
     probability panels -- each of the latter 5 overlays pm25_mean/solid
     and pm25_max/dashed in the same panel) sharing one synced time
     x-axis, plus 2 regression-result panels (historical scatter + fit
-    line, and ordinal logistic probability curves, both vs aod_om, both
-    overlaying mean/max the same way) sharing their own synced,
-    independent aod_om x-axis. Every y-axis is pinned to start at 0
+    line -- mean/max distinguished by color, blue/red, rather than line
+    style, since two full scatter clouds overlap there -- and ordinal
+    logistic probability curves, mean solid/max dashed per band color)
+    sharing their own synced, independent aod_om x-axis. Every y-axis is
+    pinned to start at 0
     (rangemode='tozero' for the forecast panels; [0,1] fixed for the
     probability panels)."""
     times = [t.isoformat() for t in df["valid_time"]]
