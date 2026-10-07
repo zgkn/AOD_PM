@@ -544,7 +544,12 @@ _ENGINE_JS = r"""
     const svg = document.createElementNS(SVGNS, 'svg');
     svg.style.display = 'block';
     svg.style.width = '100%';
-    svg.style.touchAction = 'none';
+    // Allow the browser's native vertical scroll (the page is taller than
+    // the viewport); only horizontal gestures are ours to interpret as pan
+    // or pinch -- see the touchstart/touchmove direction-lock below, which
+    // decides per-gesture whether a single-finger touch pans the chart or
+    // is left alone to scroll the page.
+    svg.style.touchAction = 'pan-y';
     svg.style.cursor = 'crosshair';
     wrap.appendChild(svg);
     container.appendChild(wrap);
@@ -611,10 +616,12 @@ _ENGINE_JS = r"""
     });
     svg.appendChild(yg);
 
-    // x ticks + gridlines
+    // x ticks + gridlines. A floor of 4 keeps the time axis from
+    // collapsing to 1-2 widely/oddly spaced ticks on a narrow mobile
+    // viewport, where plotW/divisor alone would round down to 1 or 2.
     const xTickInfo = p.group.type === 'time'
-      ? niceTime(p.group.domain[0], p.group.domain[1], Math.max(2, Math.floor(plotW / 110)))
-      : niceLinear(p.group.domain[0], p.group.domain[1], Math.max(2, Math.floor(plotW / 70)));
+      ? niceTime(p.group.domain[0], p.group.domain[1], Math.max(4, Math.floor(plotW / 90)))
+      : niceLinear(p.group.domain[0], p.group.domain[1], Math.max(3, Math.floor(plotW / 70)));
     const xg = document.createElementNS(SVGNS, 'g');
     xTickInfo.ticks.forEach(t => {
       const px = xScale.toPx(t);
@@ -810,14 +817,25 @@ _ENGINE_JS = r"""
 
     svg.addEventListener('dblclick', () => { p.group.domain = p.group.full.slice(); renderGroup(p.group); });
 
+    // A single-finger touch could mean "pan the chart" or "scroll the
+    // page" -- they can't both win. Stay undecided for the first ~8px of
+    // movement, then lock to whichever axis dominates and stick with that
+    // for the rest of the gesture (the same disambiguation a horizontal
+    // carousel uses). While undecided/scrolling we touch nothing, so the
+    // page's native touch-action:pan-y scroll runs unobstructed.
+    let touchMode = null, touchStartX = 0, touchStartY = 0;
+    const LOCK_PX = 8;
+
     svg.addEventListener('touchstart', e => {
       if (e.touches.length === 1) {
-        dragging = true; dragStartPx = e.touches[0].clientX; dragStartDomain = p.group.domain.slice();
+        touchMode = null;
+        touchStartX = e.touches[0].clientX; touchStartY = e.touches[0].clientY;
+        dragStartPx = touchStartX; dragStartDomain = p.group.domain.slice();
         const now = Date.now();
         if (now - lastTap < 320) { p.group.domain = p.group.full.slice(); renderGroup(p.group); }
         lastTap = now;
       } else if (e.touches.length === 2) {
-        dragging = false;
+        touchMode = 'pinch';
         pinchStartDist = Math.abs(e.touches[0].clientX - e.touches[1].clientX);
         pinchStartDomain = p.group.domain.slice();
       }
@@ -825,7 +843,13 @@ _ENGINE_JS = r"""
     svg.addEventListener('touchmove', e => {
       const rect = svg.getBoundingClientRect();
       const k = svg.viewBox.baseVal.width / rect.width;
-      if (e.touches.length === 1 && dragging) {
+      if (e.touches.length === 1) {
+        const dx = e.touches[0].clientX - touchStartX, dy = e.touches[0].clientY - touchStartY;
+        if (touchMode === null) {
+          if (Math.hypot(dx, dy) < LOCK_PX) return;
+          touchMode = Math.abs(dx) > Math.abs(dy) ? 'pan' : 'scroll';
+        }
+        if (touchMode !== 'pan') return;
         const dxPx = (e.touches[0].clientX - dragStartPx) * k;
         const scale = p._xScale; if (!scale) return;
         const perPx = (scale.domain[1] - scale.domain[0]) / (scale.range[1] - scale.range[0]);
@@ -842,7 +866,7 @@ _ENGINE_JS = r"""
         renderGroup(p.group);
       }
     }, { passive: true });
-    svg.addEventListener('touchend', e => { if (e.touches.length === 0) { dragging = false; pinchStartDist = null; } });
+    svg.addEventListener('touchend', e => { if (e.touches.length === 0) { touchMode = null; pinchStartDist = null; } });
 
     svg.addEventListener('mousemove', e => {
       if (dragging) return;
