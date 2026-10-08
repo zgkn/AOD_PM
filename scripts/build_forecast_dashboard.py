@@ -21,6 +21,21 @@ panels -- since max >= mean always, this reads as "typical value, with
 a dashed ceiling for how bad it could get" at a glance, which is the
 whole point of forecasting both.
 
+BIAS CORRECTION (linear lines only): the two linear forecasts are nudged
+toward the latest NEA station readings from data.gov.sg -- an additive
+offset (observed minus raw model over the forecast steps that already have
+a reading) that decays exponentially with time since the last matched step.
+Mean forecast <- mean of the 5 stations; max forecast <- max of the 5. The
+ordinal band probabilities are NOT corrected. See bias_correction.py. If
+the readings can't be fetched the dashboard falls back to the raw forecast
+and says so in the header.
+
+TIME ZONES: the CAMS forecast is UTC, the station readings are SGT. All
+matching is done in UTC (bias_correction.py); the chart is *displayed* in
+SGT by shifting every plotted timestamp by +8h in build_chart_spec (the
+client engine formats with getUTC*, so shifted values read as SGT
+wall-clock time).
+
 The ordinal params are the exact fitted statsmodels OrderedModel.params
 array; they are NOT raw cutpoints you can plug into a hand-written formula
 (OrderedModel's internal threshold parameterization isn't a simple cascade
@@ -53,6 +68,8 @@ _ENGINE_JS below for the implementation.
 """
 import argparse
 import json
+import logging
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -60,6 +77,16 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from statsmodels.miscmodels.ordinal_model import OrderedModel
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bias_correction import (  # noqa: E402
+    DEFAULT_TAU_HOURS,
+    SGT_OFFSET,
+    apply_bias_correction,
+    fetch_observations,
+    items_to_observations,
+    utc_now_naive,
+)
 
 # --- Hardcoded, fit once on the full training table (see module docstring) ---
 LINEAR_INTERCEPT = 8.682231165899342
@@ -96,6 +123,7 @@ INK = "#0b0b0b"
 # clouds where line style alone is hard to trace back to a cloud of points.
 PM25_MEAN_COLOR = "#2a78d6"
 PM25_MAX_COLOR = "#d03b3b"
+RAW_LINE_OPACITY = 0.3  # uncorrected linear lines, shown faintly beneath the corrected ones
 
 AOD_VAR_CANDIDATES = ("omaod550", "organic_matter_aerosol_optical_depth_550nm")
 
@@ -239,7 +267,7 @@ def _panel(
     }
 
 
-def build_chart_spec(df: pd.DataFrame, training_sample: pd.DataFrame) -> dict:
+def build_chart_spec(df: pd.DataFrame, training_sample: pd.DataFrame, bias: dict | None = None) -> dict:
     """JSON spec for the 8-panel dashboard, consumed by the client-side SVG
     engine (_ENGINE_JS): 6 forecast panels (AOD, a linear-estimate panel, and
     4 per-band probability panels -- each of the latter 5 overlays
@@ -248,10 +276,18 @@ def build_chart_spec(df: pd.DataFrame, training_sample: pd.DataFrame) -> dict:
     scatter + fit line -- mean/max distinguished by color, blue/red, since
     two scatter clouds overlap there -- and ordinal logistic probability
     curves, mean solid/max dashed per band color) sharing their own synced,
-    independent aod_om axis group."""
-    times_ms = (
-        (df["valid_time"] - pd.Timestamp("1970-01-01")) / pd.Timedelta(milliseconds=1)
-    ).astype("int64").tolist()
+    independent aod_om axis group.
+
+    `df["valid_time"]` is naive UTC; every time sent to the chart is shifted
+    +8h so the (getUTC*-based) client engine displays SGT. `bias` is the info
+    dict from apply_bias_correction (None = no correction attempted)."""
+    def to_chart_ms(times: pd.Series) -> list:
+        return (
+            ((times + SGT_OFFSET) - pd.Timestamp("1970-01-01")) / pd.Timedelta(milliseconds=1)
+        ).astype("int64").tolist()
+
+    times_ms = to_chart_ms(df["valid_time"])
+    corrected = bool(bias) and bias["status"] == "applied"
 
     panel_aod = _panel(
         "aod", "time", 3,
@@ -260,16 +296,50 @@ def build_chart_spec(df: pd.DataFrame, training_sample: pd.DataFrame) -> dict:
         title="CAMS forecast: max organic matter AOD over Singapore region, next 5 days",
     )
 
-    panel_linear = _panel(
-        "linear", "time", 3,
-        series=[
+    if corrected:
+        linear_series = [
+            _series(times_ms, df["pm25_linear"], INK, label="PM2.5 mean (raw)", fmt="f1",
+                    width=1.6, opacity=RAW_LINE_OPACITY),
+            _series(times_ms, df["pm25_max_linear"], INK, label="PM2.5 max (raw)", fmt="f1",
+                    dash=True, width=1.4, opacity=RAW_LINE_OPACITY),
+            _series(times_ms, df["pm25_linear_corrected"], INK, label="PM2.5 mean (corrected)", fmt="f1",
+                    markers=True, width=2),
+            _series(times_ms, df["pm25_max_linear_corrected"], INK, label="PM2.5 max (corrected)", fmt="f1",
+                    dash=True, width=1.6),
+        ]
+        obs = bias["obs"]
+        obs_ms = to_chart_ms(obs["obs_time"])
+        linear_series += [
+            _series(obs_ms, obs["obs_mean"], PM25_MEAN_COLOR, label="Observed mean (5 stations)",
+                    fmt="f1", scatter=True),
+            _series(obs_ms, obs["obs_max"], PM25_MAX_COLOR, label="Observed max (5 stations)",
+                    fmt="f1", scatter=True),
+        ]
+        # Legend sits right of x=0.17: the observed dots cluster at the panel's left edge.
+        linear_labels = [
+            _label("— PM2.5 mean (bias-corrected)", INK, 0.17, 0.95),
+            _label("- - PM2.5 max (bias-corrected)", INK, 0.17, 0.85),
+            _label("faint = uncorrected regression", MUTED, 0.17, 0.75),
+            _label("● observed mean of stations", PM25_MEAN_COLOR, 0.17, 0.65),
+            _label("● observed max of stations", PM25_MAX_COLOR, 0.17, 0.55),
+        ]
+        linear_title = ("Linear regression estimate, bias-corrected to latest station readings "
+                        "(dashed lines = haze.gov.sg band boundaries)")
+    else:
+        linear_series = [
             _series(times_ms, df["pm25_linear"], INK, label="PM2.5 mean", fmt="f1", markers=True, width=2),
             _series(times_ms, df["pm25_max_linear"], INK, label="PM2.5 max", fmt="f1", dash=True, width=1.6),
-        ],
+        ]
+        linear_labels = [_label("— PM2.5 mean", INK, 0.01, 0.95), _label("- - PM2.5 max", INK, 0.01, 0.85)]
+        linear_title = "Linear regression estimate (dashed lines = haze.gov.sg band boundaries)"
+
+    panel_linear = _panel(
+        "linear", "time", 3,
+        series=linear_series,
         y_label="Predicted PM2.5 (µg/m³)",
-        title="Linear regression estimate (dashed lines = haze.gov.sg band boundaries)",
+        title=linear_title,
         hlines=[{"y": edge, "color": BAND_COLORS[label]} for edge, label in zip(BAND_EDGES[1:-1], BAND_LABELS[1:])],
-        labels=[_label("— PM2.5 mean", INK, 0.01, 0.95), _label("- - PM2.5 max", INK, 0.01, 0.85)],
+        labels=linear_labels,
     )
 
     band_panels = []
@@ -287,7 +357,7 @@ def build_chart_spec(df: pd.DataFrame, training_sample: pd.DataFrame) -> dict:
                 "Ordinal logistic regression: predicted PM2.5 band probability (per-band detail)"
                 if i == 0 else None
             ),
-            show_x_axis=is_last, x_label="Forecast valid time (UTC)" if is_last else None,
+            show_x_axis=is_last, x_label="Forecast valid time (SGT)" if is_last else None,
             labels=[_label(label, color, 0.01, 0.85)],
         ))
 
@@ -345,7 +415,7 @@ def build_chart_spec(df: pd.DataFrame, training_sample: pd.DataFrame) -> dict:
     }
 
 
-def render_model_details() -> str:
+def render_model_details(bias: dict | None = None) -> str:
     """A table of the actual fitted equations/parameters behind the chart,
     not just a one-line R^2 summary -- the ordinal rows report statsmodels'
     raw OrderedModel.params (aod_om coefficient + 3 threshold params), not
@@ -373,6 +443,13 @@ def render_model_details() -> str:
             f"McFadden pseudo-R&sup2; = {PM25MAX_ORDINAL_MCFADDEN_R2:.3f}",
         ),
     ]
+    if bias and bias["status"] == "applied":
+        rows.append((
+            "PM2.5 mean / max", "Bias correction (linear only)",
+            "corrected = raw + offset &times; exp(&minus;(t &minus; t<sub>last</sub>) / &tau;), "
+            f"&tau; = {bias['tau_hours']:g} h",
+            f"offsets: mean {bias['offset_mean']:+.1f}, max {bias['offset_max']:+.1f} &micro;g/m&sup3;",
+        ))
     body_rows = "\n".join(
         f"    <tr><td>{target}</td><td>{model}</td><td><code>{form}</code></td><td>{fit}</td></tr>"
         for target, model, form, fit in rows
@@ -389,6 +466,8 @@ def render_model_details() -> str:
     raw <code>OrderedModel.params</code> (an aod_om coefficient plus 3 internal threshold
     parameters) -- not literal PM2.5 cutpoints, and not safe to hand-derive a formula from;
     the dashboard's predictions call the fitted model's own <code>.predict()</code> instead.
+    The bias correction touches only the two linear lines in the linear-estimate panel; the
+    ordinal band probabilities are never corrected.
     All four models were fit once (2026-10-03/2026-10-05) on the full historical training
     table (n=34,346, 2014-03-31 to 2025-12-31) and are hardcoded here, not refit per run.
   </p>
@@ -414,6 +493,7 @@ _ENGINE_JS = r"""
   const SVGNS = 'http://www.w3.org/2000/svg';
 
   function pad2(n) { return String(n).padStart(2, '0'); }
+  // Times arrive pre-shifted +8h by build_chart_spec, so UTC getters read as SGT.
   function fmtDate(ms, withTime) {
     const d = new Date(ms);
     const date = `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
@@ -732,6 +812,7 @@ _ENGINE_JS = r"""
     path.setAttribute('fill', 'none'); path.setAttribute('stroke', s.color);
     path.setAttribute('stroke-width', s.width || 1.5);
     if (s.dash) path.setAttribute('stroke-dasharray', '6,4');
+    if (s.opacity != null && s.opacity < 1) path.setAttribute('stroke-opacity', s.opacity);
     g.appendChild(path);
     return g;
   }
@@ -955,7 +1036,37 @@ _ENGINE_JS = r"""
 """
 
 
-def render_html(spec: dict, generated_at: datetime) -> str:
+SGT_TZ = timezone(SGT_OFFSET.to_pytimedelta())
+
+
+def _fmt_sgt(t: pd.Timestamp) -> str:
+    """Naive-UTC timestamp -> 'YYYY-MM-DD HH:MM SGT'."""
+    return (t + SGT_OFFSET).strftime("%Y-%m-%d %H:%M SGT")
+
+
+def _fmt_both(t: pd.Timestamp) -> str:
+    return f"{t.strftime('%H:%MZ')} ({_fmt_sgt(t)})"
+
+
+def render_bias_status(bias: dict | None) -> str:
+    """Header line saying whether the linear lines are bias-corrected, and how."""
+    if bias is None:
+        return ""
+    if bias["status"] != "applied":
+        return (
+            '  <div class="meta bias">Bias correction <b>unavailable</b> '
+            f'({bias["reason"]}) &mdash; linear lines show the uncorrected regression.</div>\n'
+        )
+    return (
+        '  <div class="meta bias">Bias correction (linear lines only; ordinal bands uncorrected): '
+        f'offset <b>{bias["offset_mean"]:+.1f}</b> &micro;g/m&sup3; on the mean and '
+        f'<b>{bias["offset_max"]:+.1f}</b> &micro;g/m&sup3; on the max, from {bias["n_points"]} '
+        f'forecast step(s) with a station reading; fades with &tau; = {bias["tau_hours"]:g} h from '
+        f'{_fmt_sgt(bias["anchor"])}. Latest reading {_fmt_sgt(bias["latest_reading"])}.</div>\n'
+    )
+
+
+def render_html(spec: dict, generated_at: datetime, bias: dict | None = None, cycle_ref: pd.Timestamp | None = None) -> str:
     spec_json = json.dumps(spec, separators=(",", ":"))
     engine_js = (
         _ENGINE_JS
@@ -964,7 +1075,11 @@ def render_html(spec: dict, generated_at: datetime) -> str:
         .replace("__MUTED__", MUTED)
         .replace("__INK__", INK)
     )
-    model_details = render_model_details()
+    model_details = render_model_details(bias)
+    bias_html = render_bias_status(bias)
+    cycle_html = (
+        f" &middot; CAMS cycle {_fmt_both(cycle_ref)}" if cycle_ref is not None else ""
+    )
     html = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -977,6 +1092,7 @@ def render_html(spec: dict, generated_at: datetime) -> str:
   h1 {{ font-size: 1.4rem; margin-bottom: 4px; }}
   h2 {{ font-size: 1.1rem; margin: 32px 0 12px; }}
   .meta {{ color: {MUTED}; font-size: 0.9rem; margin-bottom: 24px; }}
+  .meta.bias {{ margin-top: -12px; }}
   .hint {{ color: {MUTED}; font-size: 0.8rem; margin-bottom: 12px; }}
   #chart {{ position: relative; width: 100%; border-radius: 8px; border: 1px solid {GRIDLINE};
             background: {SURFACE}; padding: 8px 4px 4px; }}
@@ -1003,8 +1119,10 @@ def render_html(spec: dict, generated_at: datetime) -> str:
   <h1>Singapore PM2.5 -- 5-day forecast</h1>
   <div class="meta">
     AOD_om: max over a 3&deg;&times;3&deg; box centered on Singapore (1.5&deg;N, 103.5&deg;E), to account for forecast plume-position uncertainty
-    &middot; Generated {generated_at.strftime('%Y-%m-%d %H:%M UTC')}
+    &middot; Generated {generated_at.astimezone(SGT_TZ).strftime('%Y-%m-%d %H:%M SGT')}{cycle_html}
+    &middot; All times shown in SGT (UTC+8)
   </div>
+{bias_html}
   <div class="hint">Drag to pan, scroll or pinch to zoom, double-click/double-tap to reset, hover for exact values.</div>
 
   <div id="chart"><div id="tooltip"></div></div>
@@ -1029,7 +1147,14 @@ def main() -> int:
     parser.add_argument("--forecast-nc", default=Path("output/cams_forecast_aod_om.nc"), type=Path)
     parser.add_argument("--training-table", default=Path("data/training_table.csv"), type=Path)
     parser.add_argument("--output", default=Path("site/index.html"), type=Path)
+    parser.add_argument("--tau-hours", default=DEFAULT_TAU_HOURS, type=float,
+                        help="e-folding time of the bias-correction decay (default %(default)s h)")
+    parser.add_argument("--no-bias-correction", action="store_true",
+                        help="skip fetching station readings; show the raw linear forecast")
+    parser.add_argument("--observations-file", type=Path,
+                        help="read data.gov.sg /pm25 items from this JSON file instead of calling the API (testing)")
     args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     df = load_forecast(args.forecast_nc)
     print(f"Loaded {len(df)} forecast timesteps: {df['valid_time'].min()} to {df['valid_time'].max()}")
@@ -1037,11 +1162,32 @@ def main() -> int:
     df = compute_predictions(df)
     print(df[["valid_time", "aod_om", "pm25_linear", "pm25_band", "pm25_max_linear", "pm25_max_band"]].to_string(index=False))
 
+    bias = None
+    if not args.no_bias_correction:
+        try:
+            if args.observations_file:
+                obs = items_to_observations(json.loads(args.observations_file.read_text()))
+            else:
+                obs = fetch_observations(df["valid_time"].min(), utc_now_naive())
+        except Exception as e:  # never let a readings problem block the forecast build
+            print(f"Could not get station readings ({e.__class__.__name__}: {e}) -- using uncorrected forecast")
+            obs = None
+            bias = {"status": "unavailable", "reason": f"station readings could not be fetched: {e.__class__.__name__}"}
+        if bias is None:
+            df, bias = apply_bias_correction(df, obs, args.tau_hours)
+        if bias["status"] == "applied":
+            print(
+                f"Bias correction: mean {bias['offset_mean']:+.2f}, max {bias['offset_max']:+.2f} ug/m3 from "
+                f"{bias['n_points']} matched step(s); anchor {bias['anchor']} UTC, tau={bias['tau_hours']:g} h"
+            )
+        else:
+            print(f"Bias correction unavailable: {bias['reason']}")
+
     training_sample = load_training_sample(args.training_table)
     print(f"Loaded {len(training_sample)} historical samples for the regression-result panels")
 
-    spec = build_chart_spec(df, training_sample)
-    html = render_html(spec, datetime.now(timezone.utc))
+    spec = build_chart_spec(df, training_sample, bias)
+    html = render_html(spec, datetime.now(timezone.utc), bias, cycle_ref=df["valid_time"].min())
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(html)
