@@ -50,19 +50,16 @@ def test_sgt_dates_cross_midnight():
     assert days == ["2026-10-08", "2026-10-09"]
 
 
-def test_offset_and_decay():
+def test_offset_is_constant_over_horizon():
     obs = bc.items_to_observations(ITEMS)
-    out, info = bc.apply_bias_correction(forecast(), obs, tau_hours=12)
+    out, info = bc.apply_bias_correction(forecast(), obs)
     # matched steps 00Z (resid mean +10, max +20) and 03Z (+15, +20) -> offsets 12.5 / 20
     assert info["status"] == "applied" and info["n_points"] == 2
     assert math.isclose(info["offset_mean"], 12.5) and math.isclose(info["offset_max"], 20.0)
-    assert info["anchor"] == pd.Timestamp("2026-10-08 03:00")
     c = out.set_index("valid_time")["pm25_linear_corrected"]
-    assert math.isclose(c[pd.Timestamp("2026-10-08 00:00")], 32.5)            # before anchor: full offset
-    assert math.isclose(c[pd.Timestamp("2026-10-08 03:00")], 32.5)            # at anchor: full offset
-    assert math.isclose(c[pd.Timestamp("2026-10-08 06:00")], 20 + 12.5 * math.exp(-3 / 12))
-    assert math.isclose(c[pd.Timestamp("2026-10-08 12:00")], 20 + 12.5 * math.exp(-9 / 12))
-    assert math.isclose(c[pd.Timestamp("2026-10-10 00:00")], 20 + 12.5 * math.exp(-45 / 12))  # day 2: ~raw
+    assert all(math.isclose(v, 32.5) for v in c)  # 20 + 12.5 at every step, including day 2
+    m = out.set_index("valid_time")["pm25_max_linear_corrected"]
+    assert all(math.isclose(v, 50.0) for v in m)  # 30 + 20 at every step
     assert (out["pm25_max_linear_corrected"] >= out["pm25_linear_corrected"]).all()
 
 

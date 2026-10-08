@@ -10,7 +10,7 @@ reimplemented here, not imported, since the two repos are independent):
 
 TIME ZONES. The CAMS forecast's valid times are UTC; the API's timestamps are
 SGT (+08:00), and its ``?date=`` parameter is an SGT calendar date. All
-matching and decay maths here is done in *naive UTC* datetimes (API timestamps
+matching here is done in *naive UTC* datetimes (API timestamps
 are parsed as timezone-aware, converted to UTC, then made naive to line up
 with the forecast's naive-UTC ``valid_time``). This is the same convention
 build_training_table.py used when it joined the NEA SGT readings to the UTC
@@ -26,17 +26,14 @@ HOW. At every forecast valid time that already has a reading (the CAMS cycle's
 reference time is always in the past, so the first few 3-hourly steps
 overlap with observations), residual = observed - raw linear prediction.
 The additive offset is the mean residual over all matched steps (whatever is
-available -- at least one). It is then applied with an exponential decay in
-time since the last matched step:
+available -- at least one). That same constant is added to every forecast
+step:
 
-    corrected(t) = raw(t) + offset * exp(-max(0, t - t_anchor) / tau)
+    corrected(t) = raw(t) + offset
 
-Rationale: a recent model error says a lot about the next few hours and
-little about day 3-5 (in the training data's residuals only ~35% of a bias
-persists at 12 h and ~15-25% beyond a day), so a constant offset would
-make the later forecast worse. Results are clipped at 0, and corrected max is
-kept >= corrected mean (max-of-stations can never be below mean-of-stations,
-but the two are corrected independently).
+Results are clipped at 0, and corrected max is kept >= corrected mean
+(max-of-stations can never be below mean-of-stations, but the two are
+corrected independently).
 """
 from __future__ import annotations
 
@@ -56,7 +53,6 @@ STATIONS = ("north", "south", "east", "west", "central")
 SGT = timezone(timedelta(hours=8))
 SGT_OFFSET = pd.Timedelta(hours=8)
 
-DEFAULT_TAU_HOURS = 12.0
 MATCH_TOLERANCE = pd.Timedelta(minutes=30)
 
 REQUEST_TIMEOUT = 30
@@ -169,9 +165,7 @@ def fetch_observations(start_utc: pd.Timestamp, end_utc: pd.Timestamp) -> pd.Dat
 
 # -------------------------------------------------------------- correction
 
-def apply_bias_correction(
-    df: pd.DataFrame, obs: pd.DataFrame | None, tau_hours: float = DEFAULT_TAU_HOURS
-) -> tuple[pd.DataFrame, dict]:
+def apply_bias_correction(df: pd.DataFrame, obs: pd.DataFrame | None) -> tuple[pd.DataFrame, dict]:
     """Add ``pm25_linear_corrected`` / ``pm25_max_linear_corrected`` to a
     copy of ``df`` (needs naive-UTC ``valid_time``, ``pm25_linear``,
     ``pm25_max_linear``). Never raises on missing data: when no reading
@@ -180,8 +174,8 @@ def apply_bias_correction(
     out = df.copy()
     out["pm25_linear_corrected"] = out["pm25_linear"]
     out["pm25_max_linear_corrected"] = out["pm25_max_linear"]
-    info: dict = {"status": "unavailable", "reason": "", "tau_hours": tau_hours, "n_points": 0,
-                  "offset_mean": None, "offset_max": None, "anchor": None, "latest_reading": None,
+    info: dict = {"status": "unavailable", "reason": "", "n_points": 0,
+                  "offset_mean": None, "offset_max": None, "latest_reading": None,
                   "obs": pd.DataFrame()}
 
     if obs is None or obs.empty:
@@ -205,17 +199,14 @@ def apply_bias_correction(
     res_max = (matched["obs_max"] - matched["pm25_max_linear"]).dropna()
     offset_mean = float(res_mean.mean()) if len(res_mean) else 0.0
     offset_max = float(res_max.mean()) if len(res_max) else 0.0
-    anchor = matched["valid_time"].max()
 
-    lead_h = ((out["valid_time"] - anchor) / pd.Timedelta(hours=1)).clip(lower=0)
-    weight = np.exp(-lead_h / tau_hours)
-    mean_c = (out["pm25_linear"] + offset_mean * weight).clip(lower=0)
-    max_c = (out["pm25_max_linear"] + offset_max * weight).clip(lower=0)
+    mean_c = (out["pm25_linear"] + offset_mean).clip(lower=0)
+    max_c = (out["pm25_max_linear"] + offset_max).clip(lower=0)
     out["pm25_linear_corrected"] = mean_c
     out["pm25_max_linear_corrected"] = np.maximum(max_c, mean_c)
 
     info.update(status="applied", n_points=int(len(matched)), offset_mean=offset_mean,
-                offset_max=offset_max, anchor=anchor)
+                offset_max=offset_max)
     return out, info
 
 

@@ -23,8 +23,8 @@ whole point of forecasting both.
 
 BIAS CORRECTION (linear lines only): the two linear forecasts are nudged
 toward the latest NEA station readings from data.gov.sg -- an additive
-offset (observed minus raw model over the forecast steps that already have
-a reading) that decays exponentially with time since the last matched step.
+offset (observed minus raw model, averaged over the forecast steps that
+already have a reading) added unchanged to every forecast step.
 Mean forecast <- mean of the 5 stations; max forecast <- max of the 5. The
 ordinal band probabilities are NOT corrected. See bias_correction.py. If
 the readings can't be fetched the dashboard falls back to the raw forecast
@@ -80,7 +80,6 @@ from statsmodels.miscmodels.ordinal_model import OrderedModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bias_correction import (  # noqa: E402
-    DEFAULT_TAU_HOURS,
     SGT_OFFSET,
     apply_bias_correction,
     fetch_observations,
@@ -446,8 +445,7 @@ def render_model_details(bias: dict | None = None) -> str:
     if bias and bias["status"] == "applied":
         rows.append((
             "PM2.5 mean / max", "Bias correction (linear only)",
-            "corrected = raw + offset &times; exp(&minus;(t &minus; t<sub>last</sub>) / &tau;), "
-            f"&tau; = {bias['tau_hours']:g} h",
+            "corrected = raw + offset (constant over the horizon)",
             f"offsets: mean {bias['offset_mean']:+.1f}, max {bias['offset_max']:+.1f} &micro;g/m&sup3;",
         ))
     body_rows = "\n".join(
@@ -1061,8 +1059,8 @@ def render_bias_status(bias: dict | None) -> str:
         '  <div class="meta bias">Bias correction (linear lines only; ordinal bands uncorrected): '
         f'offset <b>{bias["offset_mean"]:+.1f}</b> &micro;g/m&sup3; on the mean and '
         f'<b>{bias["offset_max"]:+.1f}</b> &micro;g/m&sup3; on the max, from {bias["n_points"]} '
-        f'forecast step(s) with a station reading; fades with &tau; = {bias["tau_hours"]:g} h from '
-        f'{_fmt_sgt(bias["anchor"])}. Latest reading {_fmt_sgt(bias["latest_reading"])}.</div>\n'
+        f'forecast step(s) with a station reading, applied unchanged to every step. '
+        f'Latest reading {_fmt_sgt(bias["latest_reading"])}.</div>\n'
     )
 
 
@@ -1147,8 +1145,6 @@ def main() -> int:
     parser.add_argument("--forecast-nc", default=Path("output/cams_forecast_aod_om.nc"), type=Path)
     parser.add_argument("--training-table", default=Path("data/training_table.csv"), type=Path)
     parser.add_argument("--output", default=Path("site/index.html"), type=Path)
-    parser.add_argument("--tau-hours", default=DEFAULT_TAU_HOURS, type=float,
-                        help="e-folding time of the bias-correction decay (default %(default)s h)")
     parser.add_argument("--no-bias-correction", action="store_true",
                         help="skip fetching station readings; show the raw linear forecast")
     parser.add_argument("--observations-file", type=Path,
@@ -1174,11 +1170,11 @@ def main() -> int:
             obs = None
             bias = {"status": "unavailable", "reason": f"station readings could not be fetched: {e.__class__.__name__}"}
         if bias is None:
-            df, bias = apply_bias_correction(df, obs, args.tau_hours)
+            df, bias = apply_bias_correction(df, obs)
         if bias["status"] == "applied":
             print(
                 f"Bias correction: mean {bias['offset_mean']:+.2f}, max {bias['offset_max']:+.2f} ug/m3 from "
-                f"{bias['n_points']} matched step(s); anchor {bias['anchor']} UTC, tau={bias['tau_hours']:g} h"
+                f"{bias['n_points']} matched step(s)"
             )
         else:
             print(f"Bias correction unavailable: {bias['reason']}")
