@@ -1,0 +1,48 @@
+name: ERA5 925 hPa wind plot - SE Asia
+
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "UTC day to plot, YYYY-MM-DD"
+        required: true
+        default: "2026-10-18"
+
+permissions:
+  contents: read
+
+jobs:
+  plot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install cartopy (coastlines; optional)
+        continue-on-error: true
+        run: pip install cartopy
+
+      - name: Configure CDS API credentials
+        run: |
+          cat > "$HOME/.cdsapirc" <<EOF
+          url: https://cds.climate.copernicus.eu/api
+          key: ${{ secrets.CDSAPI_KEY }}
+          EOF
+
+      - name: Download ERA5 925 hPa wind and plot
+        run: python scripts/plot_era5_wind_925.py --date "${{ inputs.date }}" --outdir output
+
+      - name: Upload plot and NetCDF
+        uses: actions/upload-artifact@v4
+        with:
+          name: era5-wind-925-${{ inputs.date }}
+          path: output/
+          retention-days: 14
