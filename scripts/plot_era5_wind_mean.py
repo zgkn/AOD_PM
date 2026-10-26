@@ -4,9 +4,9 @@
 Reads the per-day files written by download_era5_wind_arco.py (one
 era5_pl_wind_YYYY-MM-DD.nc per day, 24 hourly fields each) from --indir,
 averages u/v over every hour in the inclusive range, and draws one panel per
-level: mean wind speed (average of the hourly speeds, shading) with
-mean-wind-vector arrows. Refuses to run
-if any day in the range is missing. Writes a PNG plus the mean-wind NetCDF
+level: mean wind speed in knots (average of the hourly speeds, shading) with
+streamlines of the mean wind vector. Refuses to run if any day in the range
+is missing. Writes a PNG plus the mean-wind NetCDF
 into --outdir.
 """
 import argparse
@@ -22,7 +22,13 @@ import xarray as xr  # noqa: E402
 
 # [North, West, South, East]
 AREA = [25, 90, -11, 145]
-ARROW_STRIDE = 6  # 0.25 deg grid -> one arrow every 1.5 deg
+MS_TO_KNOTS = 1.0 / 0.514444
+SINGAPORE = (103.82, 1.35)
+STREAM_DENSITY = 4
+# 5-knot bands, 0-50 kt, open-ended above
+SPEED_BOUNDS = list(range(0, 55, 5))
+SPEED_COLORS = ["#ffffff", "#d4ecea", "#a8c9df", "#b1d89d", "#5cc15c",
+                "#efe14f", "#f4a259", "#d9534f", "#b01c2a", "#d86fb0"]
 
 U_CANDIDATES = ("u", "u_component_of_wind")
 V_CANDIDATES = ("v", "v_component_of_wind")
@@ -74,53 +80,59 @@ def mean_wind(ds: xr.Dataset, levels: list[int]) -> xr.Dataset:
 def render(mean: xr.Dataset, levels: list[int], start: dt.date, end: dt.date,
            n_hours: int, out_png: Path, use_cartopy: bool) -> None:
     dim = level_dim_name(mean["u_mean"])
+    # streamplot needs strictly increasing axes; ERA5 latitude runs north to south
+    mean = mean.sortby("latitude").sortby("longitude")
     lat = mean["u_mean"]["latitude"].values
     lon = mean["u_mean"]["longitude"].values
     lon2d, lat2d = np.meshgrid(lon, lat)
-    vmax = float(np.nanpercentile(mean["mean_speed"].values, 99))
 
-    kwargs = {}
-    geo = {}
+    kwargs, geo = {}, {}
     if use_cartopy:
         import cartopy.crs as ccrs
         import cartopy.feature as cfeature
+        from cartopy.mpl.ticker import LatitudeFormatter, LongitudeFormatter
 
         kwargs["subplot_kw"] = {"projection": ccrs.PlateCarree()}
         geo = {"transform": ccrs.PlateCarree()}
-    fig, axes = plt.subplots(1, len(levels), figsize=(8 * len(levels), 7.5),
-                             constrained_layout=True, squeeze=False, **kwargs)
-    fig.suptitle(
-        f"ERA5 mean wind over Southeast Asia, {start.isoformat()} to {end.isoformat()} "
-        f"(7-day mean of {n_hours} hourly fields, UTC)",
-        fontsize=15,
-    )
-    mappable = None
+    fig, axes = plt.subplots(1, len(levels), figsize=(8.5 * len(levels), 6.6), squeeze=False, **kwargs)
+    fig.subplots_adjust(left=0.06, right=0.98, top=0.86, bottom=0.2, wspace=0.12)
+    fig.text(0.01, 0.955, f"ERA5 reanalysis, mean wind   {start.isoformat()} to {end.isoformat()} "
+             f"(average of {n_hours} hourly fields, UTC)", fontsize=15, ha="left")
+
+    contour = None
     for ax, level in zip(axes[0], levels):
         u = mean["u_mean"].sel({dim: level}).values
         v = mean["v_mean"].sel({dim: level}).values
-        speed = mean["mean_speed"].sel({dim: level}).values
-        mappable = ax.pcolormesh(lon2d, lat2d, speed, shading="auto", cmap="viridis",
-                                 vmin=0, vmax=vmax, **geo)
-        ax.quiver(
-            lon2d[::ARROW_STRIDE, ::ARROW_STRIDE], lat2d[::ARROW_STRIDE, ::ARROW_STRIDE],
-            u[::ARROW_STRIDE, ::ARROW_STRIDE], v[::ARROW_STRIDE, ::ARROW_STRIDE],
-            color="white", edgecolor="black", linewidth=0.4, scale=250, width=0.0045, **geo,
-        )
+        speed_kt = mean["mean_speed"].sel({dim: level}).values * MS_TO_KNOTS
+        contour = ax.contourf(lon2d, lat2d, speed_kt, levels=SPEED_BOUNDS, colors=SPEED_COLORS,
+                              extend="max", **geo)
+        ax.streamplot(lon, lat, u, v, color="black", linewidth=0.5, density=STREAM_DENSITY,
+                      arrowsize=0.8, **geo)
+        ax.plot(*SINGAPORE, marker="*", color="yellow", markeredgecolor="black",
+                markersize=13, linestyle="none", zorder=5, **geo)
+        ax.annotate("Singapore", SINGAPORE, xytext=(4, 5), textcoords="offset points",
+                    fontsize=8, fontweight="bold", zorder=6,
+                    bbox={"facecolor": "white", "alpha": 0.7, "edgecolor": "none", "pad": 1})
         if use_cartopy:
-            ax.add_feature(cfeature.COASTLINE, linewidth=0.7)
-            ax.add_feature(cfeature.BORDERS, linewidth=0.5, linestyle=":")
+            ax.add_feature(cfeature.COASTLINE, linewidth=0.8)
+            ax.add_feature(cfeature.BORDERS, linewidth=0.5)
             ax.set_extent([AREA[1], AREA[3], AREA[2], AREA[0]], crs=ccrs.PlateCarree())
-            gl = ax.gridlines(draw_labels=True, linewidth=0.3, alpha=0.5)
-            gl.top_labels = gl.right_labels = False
+            ax.set_xticks(np.arange(90, 146, 10), crs=ccrs.PlateCarree())
+            ax.set_yticks(np.arange(-10, 26, 5), crs=ccrs.PlateCarree())
+            ax.xaxis.set_major_formatter(LongitudeFormatter())
+            ax.yaxis.set_major_formatter(LatitudeFormatter())
         else:
             ax.set_xlim(AREA[1], AREA[3])
             ax.set_ylim(AREA[2], AREA[0])
             ax.set_xlabel("Longitude (deg E)")
             ax.set_ylabel("Latitude (deg N)")
-            ax.grid(alpha=0.3)
-        ax.set_title(f"{level} hPa")
-    fig.colorbar(mappable, ax=axes.ravel().tolist(), shrink=0.8,
-                 label="Mean wind speed (m/s)")
+        ax.set_title(f"Wind at {level} hPa", loc="left", fontsize=13)
+    cax = fig.add_axes([0.25, 0.1, 0.5, 0.035])
+    cbar = fig.colorbar(contour, cax=cax, orientation="horizontal", ticks=SPEED_BOUNDS[1:])
+    cbar.set_label("knots")
+    fig.text(0.01, 0.012, "Data: ERA5 reanalysis (ECMWF/Copernicus, via ARCO-ERA5), 0.25 deg hourly. "
+             "Shading: mean of the hourly wind speeds. Streamlines: mean wind vector.", fontsize=8,
+             color="dimgray", ha="left")
     fig.savefig(out_png, dpi=130)
     plt.close(fig)
 
