@@ -42,14 +42,16 @@ jobs:
           print("days=" + json.dumps(days))
           EOF
 
-  # One job per day, all in parallel: CDS queue waits overlap, and a failed
-  # day can be re-run alone ("Re-run failed jobs") without redoing the rest.
+  # One job per day, two at a time: CDS rejects submissions once too many of
+  # our requests sit in its queue for this dataset, so we cannot fan out fully.
+  # A failed day can be re-run alone ("Re-run failed jobs").
   download:
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         day: ${{ fromJson(needs.prepare.outputs.days) }}
     steps:

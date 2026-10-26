@@ -1,25 +1,31 @@
 #!/usr/bin/env python3
 """Download one UTC day of hourly ERA5 pressure-level u/v over Southeast Asia.
 
-One request per day keeps each CDS request small and lets the workflow run
-every day as its own parallel job, so queue waits overlap and a failed day can
-be re-run alone. The raw NetCDF (all 24 hours, all requested levels) is written
+One request per day keeps each CDS request small; the workflow runs the days as
+separate jobs with limited concurrency (CDS caps queued requests per dataset)
+so a failed day can be re-run alone. The raw NetCDF (all 24 hours, all requested levels) is written
 unchanged to --outdir; averaging happens later in plot_era5_wind_mean.py.
 """
 import argparse
 import datetime as dt
 import shutil
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
 import cdsapi
+import requests
 import xarray as xr
 
 DATASET = "reanalysis-era5-pressure-levels"
 # [North, West, South, East]
 AREA = [25, 90, -11, 145]
 ALL_HOURS = [f"{h:02d}:00" for h in range(24)]
+# CDS rejects a submission outright (HTTP 400) while too many requests for the
+# dataset are queued; wait and resubmit instead of failing the job.
+MAX_SUBMIT_ATTEMPTS = 12
+RETRY_WAIT_SECONDS = 300
 
 
 def build_request(day: dt.date, levels: list[int]) -> dict:
@@ -64,6 +70,20 @@ def verify(path: Path, levels: list[int]) -> None:
         raise RuntimeError(f"{path}: {n_times} hours (want 24), levels {got_levels} (want {sorted(levels)})")
 
 
+def retrieve_with_retry(target: Path, request: dict) -> None:
+    for attempt in range(1, MAX_SUBMIT_ATTEMPTS + 1):
+        try:
+            cdsapi.Client().retrieve(DATASET, request).download(str(target))
+            return
+        except requests.exceptions.HTTPError as exc:
+            queue_full = "Maximum number queued requests" in str(exc)
+            if not queue_full or attempt == MAX_SUBMIT_ATTEMPTS:
+                raise
+            print(f"CDS queue full (attempt {attempt}/{MAX_SUBMIT_ATTEMPTS}); "
+                  f"retrying in {RETRY_WAIT_SECONDS}s", flush=True)
+            time.sleep(RETRY_WAIT_SECONDS)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--date", required=True, help="UTC day, YYYY-MM-DD")
@@ -77,7 +97,7 @@ def main() -> int:
     target = args.outdir / f"era5_pl_wind_{day.isoformat()}.nc"
 
     print(f"Requesting {DATASET} u/v at {levels} hPa for {day.isoformat()}, area {AREA}")
-    cdsapi.Client().retrieve(DATASET, build_request(day, levels)).download(str(target))
+    retrieve_with_retry(target, build_request(day, levels))
     unwrap_if_zip(target)
     verify(target, levels)
     print(f"OK -> {target} ({target.stat().st_size} bytes)")
