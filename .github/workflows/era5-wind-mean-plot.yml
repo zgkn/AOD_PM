@@ -1,0 +1,59 @@
+name: ERA5 mean wind plot - SE Asia
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "First UTC day, YYYY-MM-DD"
+        required: true
+        default: "2015-08-30"
+      end:
+        description: "Last UTC day (inclusive), YYYY-MM-DD"
+        required: true
+        default: "2015-09-05"
+      levels:
+        description: "Comma-separated pressure levels in hPa"
+        required: true
+        default: "925,850"
+
+permissions:
+  contents: read
+
+jobs:
+  plot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install cartopy (coastlines; optional)
+        continue-on-error: true
+        run: pip install cartopy
+
+      - name: Configure CDS API credentials
+        run: |
+          cat > "$HOME/.cdsapirc" <<EOF
+          url: https://cds.climate.copernicus.eu/api
+          key: ${{ secrets.CDSAPI_KEY }}
+          EOF
+
+      - name: Download ERA5 winds, average, and plot
+        run: >-
+          python scripts/plot_era5_wind_mean.py
+          --start "${{ inputs.start }}" --end "${{ inputs.end }}"
+          --levels "${{ inputs.levels }}" --outdir output
+
+      - name: Upload plot and NetCDF
+        uses: actions/upload-artifact@v4
+        with:
+          name: era5-mean-wind-${{ inputs.start }}_${{ inputs.end }}
+          path: output/
+          retention-days: 14

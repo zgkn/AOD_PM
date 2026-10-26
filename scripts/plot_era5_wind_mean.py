@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Plot the multi-day mean ERA5 wind at pressure levels over Southeast Asia.
+
+Downloads hourly u/v (ERA5 pressure levels) for an inclusive UTC date range,
+averages over every hour in the range, and draws one panel per level: mean
+wind speed (shading) with mean-wind arrows. Writes a PNG plus the mean-wind
+NetCDF into --outdir.
+
+CDS requests take year/month/day lists as a cross-product, so a range that
+crosses a month boundary is split into one request per (year, month).
+"""
+import argparse
+import datetime as dt
+import tempfile
+from pathlib import Path
+
+import cdsapi
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+import xarray as xr  # noqa: E402
+
+from plot_era5_wind_925 import AREA, U_CANDIDATES, V_CANDIDATES, pick, unwrap_if_zip  # noqa: E402
+
+DATASET = "reanalysis-era5-pressure-levels"
+ALL_HOURS = [f"{h:02d}:00" for h in range(24)]
+ARROW_STRIDE = 6  # 0.25 deg grid -> one arrow every 1.5 deg
+
+
+def month_chunks(start: dt.date, end: dt.date) -> list[tuple[int, int, list[str]]]:
+    """Group the inclusive date range into (year, month, [day, ...]) requests."""
+    chunks: dict[tuple[int, int], list[str]] = {}
+    day = start
+    while day <= end:
+        chunks.setdefault((day.year, day.month), []).append(f"{day.day:02d}")
+        day += dt.timedelta(days=1)
+    return [(y, m, days) for (y, m), days in chunks.items()]
+
+
+def build_request(year: int, month: int, days: list[str], levels: list[int]) -> dict:
+    return {
+        "product_type": ["reanalysis"],
+        "variable": ["u_component_of_wind", "v_component_of_wind"],
+        "pressure_level": [str(p) for p in levels],
+        "year": [str(year)],
+        "month": [f"{month:02d}"],
+        "day": days,
+        "time": ALL_HOURS,
+        "area": AREA,
+        "data_format": "netcdf",
+        "download_format": "unarchived",
+    }
+
+
+def download_range(start: dt.date, end: dt.date, levels: list[int]) -> xr.Dataset:
+    client = cdsapi.Client()
+    parts = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, (year, month, days) in enumerate(month_chunks(start, end)):
+            path = Path(tmp) / f"part_{i}.nc"
+            print(f"Requesting {year}-{month:02d} days {days[0]}..{days[-1]} at {levels} hPa")
+            client.retrieve(DATASET, build_request(year, month, days, levels)).download(str(path))
+            unwrap_if_zip(path)
+            parts.append(xr.open_dataset(path).load())
+    time_dim = next(d for d in ("valid_time", "time") if d in parts[0].dims)
+    combined = xr.concat(parts, dim=time_dim) if len(parts) > 1 else parts[0]
+    return combined.sortby(time_dim).rename({time_dim: "time"})
+
+
+def level_dim_name(da: xr.DataArray) -> str:
+    return next(d for d in ("pressure_level", "level", "plev") if d in da.dims)
+
+
+def mean_wind(ds: xr.Dataset, levels: list[int]) -> xr.Dataset:
+    """Time-mean u and v per level, plus the speed of the mean wind and the
+    mean of the instantaneous speed (the latter shows how steady the flow is)."""
+    u, v = pick(ds, U_CANDIDATES), pick(ds, V_CANDIDATES)
+    dim = level_dim_name(u)
+    out = xr.Dataset()
+    out["u_mean"] = u.mean("time")
+    out["v_mean"] = v.mean("time")
+    out["speed_of_mean"] = np.hypot(out["u_mean"], out["v_mean"])
+    out["mean_speed"] = np.hypot(u, v).mean("time")
+    out.attrs["n_hours"] = int(u.sizes["time"])
+    return out.sel({dim: levels}) if dim in out.dims else out
+
+
+def render(mean: xr.Dataset, levels: list[int], start: dt.date, end: dt.date,
+           n_hours: int, out_png: Path, use_cartopy: bool) -> None:
+    dim = level_dim_name(mean["u_mean"])
+    lat = mean["u_mean"]["latitude"].values
+    lon = mean["u_mean"]["longitude"].values
+    lon2d, lat2d = np.meshgrid(lon, lat)
+    vmax = float(np.nanpercentile(mean["speed_of_mean"].values, 99))
+
+    kwargs = {}
+    geo = {}
+    if use_cartopy:
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+
+        kwargs["subplot_kw"] = {"projection": ccrs.PlateCarree()}
+        geo = {"transform": ccrs.PlateCarree()}
+    fig, axes = plt.subplots(1, len(levels), figsize=(8 * len(levels), 7.5),
+                             constrained_layout=True, squeeze=False, **kwargs)
+    fig.suptitle(
+        f"ERA5 mean wind over Southeast Asia, {start.isoformat()} to {end.isoformat()} "
+        f"(7-day mean of {n_hours} hourly fields, UTC)",
+        fontsize=15,
+    )
+    mappable = None
+    for ax, level in zip(axes[0], levels):
+        u = mean["u_mean"].sel({dim: level}).values
+        v = mean["v_mean"].sel({dim: level}).values
+        speed = np.hypot(u, v)
+        mappable = ax.pcolormesh(lon2d, lat2d, speed, shading="auto", cmap="viridis",
+                                 vmin=0, vmax=vmax, **geo)
+        ax.quiver(
+            lon2d[::ARROW_STRIDE, ::ARROW_STRIDE], lat2d[::ARROW_STRIDE, ::ARROW_STRIDE],
+            u[::ARROW_STRIDE, ::ARROW_STRIDE], v[::ARROW_STRIDE, ::ARROW_STRIDE],
+            color="white", edgecolor="black", linewidth=0.4, scale=250, width=0.0045, **geo,
+        )
+        if use_cartopy:
+            ax.add_feature(cfeature.COASTLINE, linewidth=0.7)
+            ax.add_feature(cfeature.BORDERS, linewidth=0.5, linestyle=":")
+            ax.set_extent([AREA[1], AREA[3], AREA[2], AREA[0]], crs=ccrs.PlateCarree())
+            gl = ax.gridlines(draw_labels=True, linewidth=0.3, alpha=0.5)
+            gl.top_labels = gl.right_labels = False
+        else:
+            ax.set_xlim(AREA[1], AREA[3])
+            ax.set_ylim(AREA[2], AREA[0])
+            ax.set_xlabel("Longitude (deg E)")
+            ax.set_ylabel("Latitude (deg N)")
+            ax.grid(alpha=0.3)
+        ax.set_title(f"{level} hPa")
+    fig.colorbar(mappable, ax=axes.ravel().tolist(), shrink=0.8,
+                 label="Speed of the mean wind (m/s)")
+    fig.savefig(out_png, dpi=130)
+    plt.close(fig)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--start", required=True, help="first UTC day, YYYY-MM-DD")
+    parser.add_argument("--end", required=True, help="last UTC day (inclusive), YYYY-MM-DD")
+    parser.add_argument("--levels", default="925,850", help="comma-separated hPa levels")
+    parser.add_argument("--outdir", default="output", type=Path)
+    args = parser.parse_args()
+
+    start, end = dt.date.fromisoformat(args.start), dt.date.fromisoformat(args.end)
+    if end < start:
+        raise SystemExit("--end must not be before --start")
+    levels = [int(p) for p in args.levels.split(",")]
+    args.outdir.mkdir(parents=True, exist_ok=True)
+    tag = f"{start.isoformat()}_{end.isoformat()}"
+    png_path = args.outdir / f"era5_mean_wind_{tag}.png"
+    nc_path = args.outdir / f"era5_mean_wind_{tag}.nc"
+
+    ds = download_range(start, end, levels)
+    n_hours = int(ds.sizes["time"])
+    expected = ((end - start).days + 1) * 24
+    print(f"Got {n_hours} hourly fields (expected {expected})")
+    if n_hours != expected:
+        raise SystemExit(f"hourly field count {n_hours} != expected {expected}; refusing to plot")
+
+    mean = mean_wind(ds, levels)
+    mean.to_netcdf(nc_path)
+    try:
+        render(mean, levels, start, end, n_hours, png_path, use_cartopy=True)
+        print("Rendered with cartopy coastlines.")
+    except Exception as exc:  # e.g. Natural Earth download blocked on the runner
+        print(f"cartopy render failed ({exc.__class__.__name__}: {exc}); using plain lat/lon.")
+        render(mean, levels, start, end, n_hours, png_path, use_cartopy=False)
+    print(f"Wrote {png_path} and {nc_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
