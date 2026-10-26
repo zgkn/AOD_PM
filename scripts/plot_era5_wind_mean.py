@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
-"""Plot the multi-day mean ERA5 wind at pressure levels over Southeast Asia.
+"""Average ERA5 winds over a UTC date range and plot them over Southeast Asia.
 
-Downloads hourly u/v (ERA5 pressure levels) for an inclusive UTC date range,
-averages over every hour in the range, and draws one panel per level: mean
-wind speed (shading) with mean-wind arrows. Writes a PNG plus the mean-wind
-NetCDF into --outdir.
-
-CDS requests take year/month/day lists as a cross-product, so a range that
-crosses a month boundary is split into one request per (year, month).
+Reads the per-day files written by download_era5_wind_day.py (one
+era5_pl_wind_YYYY-MM-DD.nc per day, 24 hourly fields each) from --indir,
+averages u/v over every hour in the inclusive range, and draws one panel per
+level: speed of the mean wind (shading) with mean-wind arrows. Refuses to run
+if any day in the range is missing. Writes a PNG plus the mean-wind NetCDF
+into --outdir.
 """
 import argparse
 import datetime as dt
-import tempfile
 from pathlib import Path
 
-import cdsapi
 import matplotlib
 
 matplotlib.use("Agg")
@@ -22,48 +19,24 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import xarray as xr  # noqa: E402
 
-from plot_era5_wind_925 import AREA, U_CANDIDATES, V_CANDIDATES, pick, unwrap_if_zip  # noqa: E402
+from plot_era5_wind_925 import AREA, U_CANDIDATES, V_CANDIDATES, pick  # noqa: E402
 
-DATASET = "reanalysis-era5-pressure-levels"
-ALL_HOURS = [f"{h:02d}:00" for h in range(24)]
 ARROW_STRIDE = 6  # 0.25 deg grid -> one arrow every 1.5 deg
 
 
-def month_chunks(start: dt.date, end: dt.date) -> list[tuple[int, int, list[str]]]:
-    """Group the inclusive date range into (year, month, [day, ...]) requests."""
-    chunks: dict[tuple[int, int], list[str]] = {}
+def load_local(indir: Path, start: dt.date, end: dt.date) -> xr.Dataset:
+    """Concatenate the daily files for [start, end] along time."""
+    parts, missing = [], []
     day = start
     while day <= end:
-        chunks.setdefault((day.year, day.month), []).append(f"{day.day:02d}")
-        day += dt.timedelta(days=1)
-    return [(y, m, days) for (y, m), days in chunks.items()]
-
-
-def build_request(year: int, month: int, days: list[str], levels: list[int]) -> dict:
-    return {
-        "product_type": ["reanalysis"],
-        "variable": ["u_component_of_wind", "v_component_of_wind"],
-        "pressure_level": [str(p) for p in levels],
-        "year": [str(year)],
-        "month": [f"{month:02d}"],
-        "day": days,
-        "time": ALL_HOURS,
-        "area": AREA,
-        "data_format": "netcdf",
-        "download_format": "unarchived",
-    }
-
-
-def download_range(start: dt.date, end: dt.date, levels: list[int]) -> xr.Dataset:
-    client = cdsapi.Client()
-    parts = []
-    with tempfile.TemporaryDirectory() as tmp:
-        for i, (year, month, days) in enumerate(month_chunks(start, end)):
-            path = Path(tmp) / f"part_{i}.nc"
-            print(f"Requesting {year}-{month:02d} days {days[0]}..{days[-1]} at {levels} hPa")
-            client.retrieve(DATASET, build_request(year, month, days, levels)).download(str(path))
-            unwrap_if_zip(path)
+        path = indir / f"era5_pl_wind_{day.isoformat()}.nc"
+        if path.exists():
             parts.append(xr.open_dataset(path).load())
+        else:
+            missing.append(day.isoformat())
+        day += dt.timedelta(days=1)
+    if missing:
+        raise SystemExit(f"missing daily files in {indir}: {', '.join(missing)}")
     time_dim = next(d for d in ("valid_time", "time") if d in parts[0].dims)
     combined = xr.concat(parts, dim=time_dim) if len(parts) > 1 else parts[0]
     return combined.sortby(time_dim).rename({time_dim: "time"})
@@ -146,6 +119,7 @@ def main() -> int:
     parser.add_argument("--start", required=True, help="first UTC day, YYYY-MM-DD")
     parser.add_argument("--end", required=True, help="last UTC day (inclusive), YYYY-MM-DD")
     parser.add_argument("--levels", default="925,850", help="comma-separated hPa levels")
+    parser.add_argument("--indir", default="raw", type=Path, help="directory of per-day NetCDF files")
     parser.add_argument("--outdir", default="output", type=Path)
     args = parser.parse_args()
 
@@ -158,7 +132,7 @@ def main() -> int:
     png_path = args.outdir / f"era5_mean_wind_{tag}.png"
     nc_path = args.outdir / f"era5_mean_wind_{tag}.nc"
 
-    ds = download_range(start, end, levels)
+    ds = load_local(args.indir, start, end)
     n_hours = int(ds.sizes["time"])
     expected = ((end - start).days + 1) * 24
     print(f"Got {n_hours} hourly fields (expected {expected})")

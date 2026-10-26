@@ -20,7 +20,71 @@ permissions:
   contents: read
 
 jobs:
-  plot:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      days: ${{ steps.days.outputs.days }}
+    steps:
+      - name: List the UTC days in the range
+        id: days
+        env:
+          START: ${{ inputs.start }}
+          END: ${{ inputs.end }}
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import datetime as dt, json, os, sys
+          start = dt.date.fromisoformat(os.environ["START"])
+          end = dt.date.fromisoformat(os.environ["END"])
+          n = (end - start).days + 1
+          if n < 1 or n > 31:
+              sys.exit(f"range must be 1-31 days, got {n}")
+          days = [(start + dt.timedelta(days=i)).isoformat() for i in range(n)]
+          print("days=" + json.dumps(days))
+          EOF
+
+  # One job per day, all in parallel: CDS queue waits overlap, and a failed
+  # day can be re-run alone ("Re-run failed jobs") without redoing the rest.
+  download:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        day: ${{ fromJson(needs.prepare.outputs.days) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install cdsapi xarray netCDF4 numpy
+
+      - name: Configure CDS API credentials
+        run: |
+          cat > "$HOME/.cdsapirc" <<EOF
+          url: https://cds.climate.copernicus.eu/api
+          key: ${{ secrets.CDSAPI_KEY }}
+          EOF
+
+      - name: Download one day of ERA5 winds
+        run: >-
+          python scripts/download_era5_wind_day.py
+          --date "${{ matrix.day }}" --levels "${{ inputs.levels }}" --outdir raw
+
+      - name: Upload the raw day
+        uses: actions/upload-artifact@v4
+        with:
+          name: era5-raw-${{ matrix.day }}
+          path: raw/
+          retention-days: 14
+
+  average-and-plot:
+    needs: download
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -38,20 +102,20 @@ jobs:
         continue-on-error: true
         run: pip install cartopy
 
-      - name: Configure CDS API credentials
-        run: |
-          cat > "$HOME/.cdsapirc" <<EOF
-          url: https://cds.climate.copernicus.eu/api
-          key: ${{ secrets.CDSAPI_KEY }}
-          EOF
+      - name: Fetch the daily files
+        uses: actions/download-artifact@v4
+        with:
+          pattern: era5-raw-*
+          path: raw
+          merge-multiple: true
 
-      - name: Download ERA5 winds, average, and plot
+      - name: Average and plot
         run: >-
           python scripts/plot_era5_wind_mean.py
           --start "${{ inputs.start }}" --end "${{ inputs.end }}"
-          --levels "${{ inputs.levels }}" --outdir output
+          --levels "${{ inputs.levels }}" --indir raw --outdir output
 
-      - name: Upload plot and NetCDF
+      - name: Upload plot and mean NetCDF
         uses: actions/upload-artifact@v4
         with:
           name: era5-mean-wind-${{ inputs.start }}_${{ inputs.end }}
