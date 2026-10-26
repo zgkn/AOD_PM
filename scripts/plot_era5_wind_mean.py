@@ -4,7 +4,8 @@
 Reads the per-day files written by download_era5_wind_day.py (one
 era5_pl_wind_YYYY-MM-DD.nc per day, 24 hourly fields each) from --indir,
 averages u/v over every hour in the inclusive range, and draws one panel per
-level: speed of the mean wind (shading) with mean-wind arrows. Refuses to run
+level: mean wind speed (average of the hourly speeds, shading) with
+mean-wind-vector arrows. Refuses to run
 if any day in the range is missing. Writes a PNG plus the mean-wind NetCDF
 into --outdir.
 """
@@ -66,7 +67,7 @@ def render(mean: xr.Dataset, levels: list[int], start: dt.date, end: dt.date,
     lat = mean["u_mean"]["latitude"].values
     lon = mean["u_mean"]["longitude"].values
     lon2d, lat2d = np.meshgrid(lon, lat)
-    vmax = float(np.nanpercentile(mean["speed_of_mean"].values, 99))
+    vmax = float(np.nanpercentile(mean["mean_speed"].values, 99))
 
     kwargs = {}
     geo = {}
@@ -87,7 +88,7 @@ def render(mean: xr.Dataset, levels: list[int], start: dt.date, end: dt.date,
     for ax, level in zip(axes[0], levels):
         u = mean["u_mean"].sel({dim: level}).values
         v = mean["v_mean"].sel({dim: level}).values
-        speed = np.hypot(u, v)
+        speed = mean["mean_speed"].sel({dim: level}).values
         mappable = ax.pcolormesh(lon2d, lat2d, speed, shading="auto", cmap="viridis",
                                  vmin=0, vmax=vmax, **geo)
         ax.quiver(
@@ -109,7 +110,7 @@ def render(mean: xr.Dataset, levels: list[int], start: dt.date, end: dt.date,
             ax.grid(alpha=0.3)
         ax.set_title(f"{level} hPa")
     fig.colorbar(mappable, ax=axes.ravel().tolist(), shrink=0.8,
-                 label="Speed of the mean wind (m/s)")
+                 label="Mean wind speed (m/s)")
     fig.savefig(out_png, dpi=130)
     plt.close(fig)
 
