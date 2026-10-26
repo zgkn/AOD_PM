@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Average ERA5 winds over a UTC date range and plot them over Southeast Asia.
 
-Reads the per-day files written by download_era5_wind_day.py (one
+Reads the per-day files written by download_era5_wind_arco.py (one
 era5_pl_wind_YYYY-MM-DD.nc per day, 24 hourly fields each) from --indir,
 averages u/v over every hour in the inclusive range, and draws one panel per
 level: mean wind speed (average of the hourly speeds, shading) with
@@ -20,9 +20,19 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import xarray as xr  # noqa: E402
 
-from plot_era5_wind_925 import AREA, U_CANDIDATES, V_CANDIDATES, pick  # noqa: E402
-
+# [North, West, South, East]
+AREA = [25, 90, -11, 145]
 ARROW_STRIDE = 6  # 0.25 deg grid -> one arrow every 1.5 deg
+
+U_CANDIDATES = ("u", "u_component_of_wind")
+V_CANDIDATES = ("v", "v_component_of_wind")
+
+
+def pick(ds: xr.Dataset, candidates: tuple) -> xr.DataArray:
+    name = next((n for n in candidates if n in ds.data_vars), None)
+    if name is None:
+        raise RuntimeError(f"none of {candidates} in data variables {list(ds.data_vars)}")
+    return ds[name]
 
 
 def load_local(indir: Path, start: dt.date, end: dt.date) -> xr.Dataset:
